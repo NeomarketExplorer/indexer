@@ -7,6 +7,7 @@ import { app } from './api';
 import { getConfig } from './lib/config';
 import { getLogger } from './lib/logger';
 import { getDb, closeDb } from './db';
+import { closeRedis } from './lib/redis';
 
 const logger = getLogger();
 const config = getConfig();
@@ -29,6 +30,7 @@ async function startServer() {
   const shutdown = async () => {
     logger.info('Shutting down API server');
     server.close();
+    await closeRedis();
     await closeDb();
     process.exit(0);
   };

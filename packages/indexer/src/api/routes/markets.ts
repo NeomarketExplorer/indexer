@@ -4,8 +4,10 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq, desc, asc, and, like, sql, or, ilike } from 'drizzle-orm';
+import { eq, desc, asc, and, sql } from 'drizzle-orm';
 import { getDb, markets, priceHistory, trades } from '../../db';
+import { cached } from '../middleware/cache';
+import { ftsWhere } from '../../db/search';
 
 export const marketsRouter = new Hono();
 
@@ -24,7 +26,7 @@ const ListMarketsQuerySchema = z.object({
 /**
  * GET /markets - List markets with filters
  */
-marketsRouter.get('/', async (c) => {
+marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
   const query = ListMarketsQuerySchema.safeParse(c.req.query());
 
   if (!query.success) {
@@ -50,12 +52,7 @@ marketsRouter.get('/', async (c) => {
   }
 
   if (search) {
-    conditions.push(
-      or(
-        ilike(markets.question, `%${search}%`),
-        ilike(markets.description, `%${search}%`)
-      )!
-    );
+    conditions.push(ftsWhere(markets.searchVector, search));
   }
 
   // Build order by
@@ -107,7 +104,7 @@ marketsRouter.get('/', async (c) => {
 /**
  * GET /markets/search - Full-text search
  */
-marketsRouter.get('/search', async (c) => {
+marketsRouter.get('/search', cached({ ttl: 90 }), async (c) => {
   const q = c.req.query('q');
   const limit = Math.min(parseInt(c.req.query('limit') ?? '20', 10), 100);
 
@@ -118,10 +115,7 @@ marketsRouter.get('/search', async (c) => {
   const db = getDb();
 
   const result = await db.query.markets.findMany({
-    where: or(
-      ilike(markets.question, `%${q}%`),
-      ilike(markets.description, `%${q}%`)
-    ),
+    where: ftsWhere(markets.searchVector, q),
     orderBy: [desc(markets.volume24hr)],
     limit,
     columns: {
@@ -142,7 +136,7 @@ marketsRouter.get('/search', async (c) => {
 /**
  * GET /markets/:id - Single market by ID
  */
-marketsRouter.get('/:id', async (c) => {
+marketsRouter.get('/:id', cached({ ttl: 30 }), async (c) => {
   const id = c.req.param('id');
   const db = getDb();
 
@@ -163,7 +157,7 @@ marketsRouter.get('/:id', async (c) => {
 /**
  * GET /markets/:id/history - Price history for a market
  */
-marketsRouter.get('/:id/history', async (c) => {
+marketsRouter.get('/:id/history', cached({ ttl: 45 }), async (c) => {
   const id = c.req.param('id');
   const interval = c.req.query('interval') ?? '1w';
   const limit = Math.min(parseInt(c.req.query('limit') ?? '500', 10), 1000);
@@ -226,7 +220,7 @@ marketsRouter.get('/:id/history', async (c) => {
 /**
  * GET /markets/:id/trades - Recent trades for a market
  */
-marketsRouter.get('/:id/trades', async (c) => {
+marketsRouter.get('/:id/trades', cached({ ttl: 15 }), async (c) => {
   const id = c.req.param('id');
   const limit = Math.min(parseInt(c.req.query('limit') ?? '50', 10), 200);
   const db = getDb();

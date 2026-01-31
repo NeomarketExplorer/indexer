@@ -8,6 +8,7 @@ import { SyncOrchestrator } from './sync';
 import { getConfig } from './lib/config';
 import { getLogger } from './lib/logger';
 import { getDb, closeDb } from './db';
+import { closeRedis } from './lib/redis';
 
 const logger = getLogger();
 const config = getConfig();
@@ -55,6 +56,7 @@ async function main() {
     clearInterval(statusInterval);
     server.close();
     await orchestrator.stop();
+    await closeRedis();
     await closeDb();
     logger.info('Shutdown complete');
     process.exit(0);

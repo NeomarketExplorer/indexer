@@ -8,6 +8,13 @@
       "when": 1769258785875,
       "tag": "0000_green_riptide",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1769259000000,
+      "tag": "0001_add_full_text_search",
+      "breakpoints": true
     }
   ]
 }

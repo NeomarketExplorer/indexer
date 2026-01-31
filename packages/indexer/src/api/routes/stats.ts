@@ -5,13 +5,14 @@
 import { Hono } from 'hono';
 import { sql, eq } from 'drizzle-orm';
 import { getDb, markets, events, trades, syncState } from '../../db';
+import { cached } from '../middleware/cache';
 
 export const statsRouter = new Hono();
 
 /**
  * GET /stats - Platform overview statistics
  */
-statsRouter.get('/', async (c) => {
+statsRouter.get('/', cached({ ttl: 120 }), async (c) => {
   const db = getDb();
 
   // Get market counts
@@ -93,7 +94,7 @@ statsRouter.get('/', async (c) => {
 /**
  * GET /stats/sync - Sync status
  */
-statsRouter.get('/sync', async (c) => {
+statsRouter.get('/sync', cached({ ttl: 30 }), async (c) => {
   const db = getDb();
 
   const syncStates = await db.query.syncState.findMany();

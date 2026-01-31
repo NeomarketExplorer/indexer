@@ -6,6 +6,7 @@ import { SyncOrchestrator } from './sync';
 import { getConfig } from './lib/config';
 import { getLogger } from './lib/logger';
 import { getDb, closeDb } from './db';
+import { closeRedis } from './lib/redis';
 
 const logger = getLogger();
 const config = getConfig();
@@ -25,6 +26,7 @@ async function startWorker() {
   const shutdown = async () => {
     logger.info('Shutting down sync worker');
     await orchestrator.stop();
+    await closeRedis();
     await closeDb();
     process.exit(0);
   };

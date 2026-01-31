@@ -18,6 +18,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: polymarket-indexer-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Optional: ClickHouse for analytics (uncomment when needed)
   # clickhouse:
   #   image: clickhouse/clickhouse-server:24-alpine
@@ -38,4 +52,5 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   # clickhouse_data:

@@ -31,6 +31,7 @@ export interface WebSocketConfig {
   onClose?: () => void;
   onError?: (error: Event) => void;
   onMessage?: (message: WebSocketMessage) => void;
+  onParseError?: (error: unknown, rawData: string) => void;
 }
 
 export type MessageHandler = (message: WebSocketMessage) => void;
@@ -105,8 +106,8 @@ export class WebSocketManager {
           try {
             const message = JSON.parse(event.data) as WebSocketMessage;
             this.handleMessage(message);
-          } catch {
-            console.warn('Failed to parse WebSocket message:', event.data);
+          } catch (error) {
+            this.config.onParseError?.(error, event.data);
           }
         };
       } catch (error) {

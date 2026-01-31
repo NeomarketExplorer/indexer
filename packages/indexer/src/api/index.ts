@@ -12,16 +12,19 @@ import { marketsRouter } from './routes/markets';
 import { eventsRouter } from './routes/events';
 import { statsRouter } from './routes/stats';
 import { healthRouter } from './routes/health';
+import { getLogger } from '../lib/logger';
+import { getConfig } from '../lib/config';
 
 export type AppEnv = {
   // Add bindings/variables here if needed
 };
 
 const app = new Hono<AppEnv>();
+const config = getConfig();
 
 // Middleware
 app.use('*', cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://127.0.0.1:3000'],
+  origin: config.corsOrigins,
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
@@ -57,7 +60,8 @@ app.notFound((c) => {
 
 // Error handler
 app.onError((err, c) => {
-  console.error('API Error:', err);
+  const logger = getLogger();
+  logger.error({ err, path: c.req.path }, 'API Error');
   return c.json(
     {
       error: 'Internal Server Error',

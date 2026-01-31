@@ -16,8 +16,16 @@ import {
   index,
   uniqueIndex,
   primaryKey,
+  customType,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
+
+// Custom tsvector type for full-text search
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return 'tsvector';
+  },
+});
 
 // ============================================
 // EVENTS
@@ -38,12 +46,14 @@ export const events = pgTable('events', {
   active: boolean('active').default(true),
   closed: boolean('closed').default(false),
   archived: boolean('archived').default(false),
+  searchVector: tsvector('search_vector'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 }, (table) => [
   index('events_slug_idx').on(table.slug),
   index('events_active_idx').on(table.active),
   index('events_volume_idx').on(table.volume),
+  index('events_search_idx').using('gin', table.searchVector),
 ]);
 
 // ============================================
@@ -88,6 +98,9 @@ export const markets = pgTable('markets', {
   resolved: boolean('resolved').default(false),
   winningOutcome: integer('winning_outcome'),
 
+  // Full-text search
+  searchVector: tsvector('search_vector'),
+
   // Timestamps
   priceUpdatedAt: timestamp('price_updated_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -101,6 +114,7 @@ export const markets = pgTable('markets', {
   index('markets_volume_idx').on(table.volume),
   index('markets_volume_24hr_idx').on(table.volume24hr),
   index('markets_liquidity_idx').on(table.liquidity),
+  index('markets_search_idx').using('gin', table.searchVector),
 ]);
 
 // ============================================

@@ -17,6 +17,19 @@ services:
       retries: 5
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: polymarket-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   indexer:
     build:
       context: .
@@ -26,6 +39,8 @@ services:
       NODE_ENV: production
       PORT: 3005
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-polymarket}
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGINS: https://neomarket.bet,https://www.neomarket.bet,http://localhost:3000,http://localhost:3001
       SYNC_ENABLED: ${SYNC_ENABLED:-true}
       SYNC_INTERVAL_MS: ${SYNC_INTERVAL_MS:-300000}
     ports:
@@ -39,7 +54,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:

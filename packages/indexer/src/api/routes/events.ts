@@ -4,8 +4,10 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq, desc, asc, and, ilike, sql, or } from 'drizzle-orm';
+import { eq, desc, asc, and, sql } from 'drizzle-orm';
 import { getDb, events } from '../../db';
+import { cached } from '../middleware/cache';
+import { ftsWhere } from '../../db/search';
 
 export const eventsRouter = new Hono();
 
@@ -23,7 +25,7 @@ const ListEventsQuerySchema = z.object({
 /**
  * GET /events - List events with filters
  */
-eventsRouter.get('/', async (c) => {
+eventsRouter.get('/', cached({ ttl: 60 }), async (c) => {
   const query = ListEventsQuerySchema.safeParse(c.req.query());
 
   if (!query.success) {
@@ -45,12 +47,7 @@ eventsRouter.get('/', async (c) => {
   }
 
   if (search) {
-    conditions.push(
-      or(
-        ilike(events.title, `%${search}%`),
-        ilike(events.description, `%${search}%`)
-      )!
-    );
+    conditions.push(ftsWhere(events.searchVector, search));
   }
 
   // Build order by
@@ -93,7 +90,7 @@ eventsRouter.get('/', async (c) => {
 /**
  * GET /events/:id - Single event with markets
  */
-eventsRouter.get('/:id', async (c) => {
+eventsRouter.get('/:id', cached({ ttl: 30 }), async (c) => {
   const id = c.req.param('id');
   const db = getDb();
 

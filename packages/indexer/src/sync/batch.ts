@@ -9,6 +9,7 @@ import { createClobClient } from '@app/api/clob';
 import { getDb, markets, events, syncState, type NewMarket, type NewEvent } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
+import { invalidateCache } from '../api/middleware/cache';
 
 export class BatchSyncManager {
   private logger = createChildLogger({ module: 'batch-sync' });
@@ -132,6 +133,9 @@ export class BatchSyncManager {
 
       await this.updateSyncState('events', 'idle', { count: totalEvents, durationMs: Date.now() - startTime });
 
+      // Invalidate cache after successful sync
+      await invalidateCache('neomarket:cache:*');
+
       this.logger.info({
         totalEvents,
         durationMs: Date.now() - startTime,
@@ -206,6 +210,9 @@ export class BatchSyncManager {
       await fetchByFilter({ closed: true });
 
       await this.updateSyncState('markets', 'idle', { count: totalMarkets, durationMs: Date.now() - startTime });
+
+      // Invalidate cache after successful sync
+      await invalidateCache('neomarket:cache:*');
 
       this.lastSyncAt = new Date();
       this.logger.info({
@@ -449,8 +456,9 @@ export class BatchSyncManager {
 
   /**
    * Sync trades from CLOB API for a specific market
+   * Returns result so callers can detect failure without crashing the sync loop
    */
-  async syncTrades(tokenId: string, marketId: string): Promise<void> {
+  async syncTrades(tokenId: string, marketId: string): Promise<{ success: boolean; count: number }> {
     const db = getDb();
 
     try {
@@ -476,8 +484,10 @@ export class BatchSyncManager {
       }
 
       this.logger.debug({ tokenId, count: trades.length }, 'Synced trades');
+      return { success: true, count: trades.length };
     } catch (error) {
       this.logger.error({ tokenId, error }, 'Failed to sync trades');
+      return { success: false, count: 0 };
     }
   }
 

@@ -31,6 +31,12 @@ const ConfigSchema = z.object({
   marketsBatchSize: z.coerce.number().int().positive().default(500),
   tradesBatchSize: z.coerce.number().int().positive().default(500),
 
+  // Redis (optional — caching disabled if not set)
+  redisUrl: z.string().url().optional(),
+
+  // CORS
+  corsOrigins: z.string().transform(s => s.split(',').map(o => o.trim())).default('http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000'),
+
   // Logging
   logLevel: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 
@@ -65,6 +71,8 @@ export function getConfig(): Config {
     dataApiUrl: process.env.DATA_API_URL,
     marketsBatchSize: process.env.MARKETS_BATCH_SIZE,
     tradesBatchSize: process.env.TRADES_BATCH_SIZE,
+    redisUrl: process.env.REDIS_URL,
+    corsOrigins: process.env.CORS_ORIGINS,
     logLevel: process.env.LOG_LEVEL,
     nodeEnv: process.env.NODE_ENV,
   };
@@ -77,7 +85,7 @@ export function getConfig(): Config {
   const result = ConfigSchema.safeParse(cleanConfig);
 
   if (!result.success) {
-    console.error('Invalid configuration:', result.error.format());
+    process.stderr.write(`Invalid configuration: ${JSON.stringify(result.error.format(), null, 2)}\n`);
     throw new Error('Invalid configuration');
   }
 
