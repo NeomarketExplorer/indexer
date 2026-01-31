@@ -28,9 +28,12 @@ export function getDb(): PostgresJsDatabase<typeof schema> {
   logger.info({ url: config.databaseUrl.replace(/:[^:@]+@/, ':****@') }, 'Connecting to database');
 
   queryClient = postgres(config.databaseUrl, {
-    max: 10,
+    max: config.dbPoolMax,
     idle_timeout: 20,
     connect_timeout: 10,
+    connection: {
+      statement_timeout: config.queryTimeoutMs,
+    },
   });
 
   db = drizzle(queryClient, { schema });
@@ -60,6 +63,22 @@ export async function checkDbConnection(): Promise<boolean> {
     return true;
   } catch (error) {
     getLogger().error({ error }, 'Database connection check failed');
+    return false;
+  }
+}
+
+/**
+ * Verify that required tables exist (migration check).
+ * Returns false if core tables are missing — caller should abort.
+ */
+export async function verifySchema(): Promise<boolean> {
+  try {
+    const database = getDb();
+    await database.execute(sql`SELECT 1 FROM events LIMIT 0`);
+    await database.execute(sql`SELECT 1 FROM markets LIMIT 0`);
+    await database.execute(sql`SELECT 1 FROM sync_state LIMIT 0`);
+    return true;
+  } catch {
     return false;
   }
 }

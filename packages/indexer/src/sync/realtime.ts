@@ -1,9 +1,14 @@
 /**
  * Real-time sync manager - WebSocket price updates
+ *
+ * Fixes applied:
+ * - #6  Buffer snapshot: clear only after successful flush
+ * - #7  Do not overwrite lastTradePrice from WS updates
+ * - #9  Never permanently give up reconnecting
  */
 
 import { eq, sql } from 'drizzle-orm';
-import { getDb, markets, priceHistory } from '../db';
+import { getDb, markets, priceHistory, syncState } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
 import WebSocket from 'ws';
@@ -22,6 +27,8 @@ interface WebSocketMessage {
   price?: string | number;
   timestamp?: number;
 }
+
+const BUFFER_SIZE_WARNING = 10000;
 
 export class RealtimeSyncManager {
   private logger = createChildLogger({ module: 'realtime-sync' });
@@ -42,13 +49,8 @@ export class RealtimeSyncManager {
   async start(): Promise<void> {
     this.logger.info('Starting real-time sync');
 
-    // Load active tokens from database
     await this.loadActiveTokens();
-
-    // Connect to WebSocket
     await this.connect();
-
-    // Start price flush interval
     this.startFlushInterval();
   }
 
@@ -64,10 +66,8 @@ export class RealtimeSyncManager {
       this.flushInterval = null;
     }
 
-    // Flush remaining prices
     await this.flushPrices();
 
-    // Close WebSocket
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -128,8 +128,8 @@ export class RealtimeSyncManager {
 
         this.logger.info('WebSocket connected');
 
-        // Subscribe to price updates for all tokens
         this.subscribeToTokens();
+        this.updatePricesSyncState('connected');
         resolve();
       });
 
@@ -141,6 +141,7 @@ export class RealtimeSyncManager {
         this.isConnecting = false;
         this.isConnected = false;
         this.logger.warn('WebSocket disconnected');
+        this.updatePricesSyncState('disconnected');
 
         if (this.shouldReconnect) {
           this.scheduleReconnect();
@@ -168,7 +169,6 @@ export class RealtimeSyncManager {
 
     const tokenIds = Array.from(this.subscribedTokens);
 
-    // Subscribe in batches to avoid message size limits
     const batchSize = 100;
     for (let i = 0; i < tokenIds.length; i += batchSize) {
       const batch = tokenIds.slice(i, i + batchSize);
@@ -192,7 +192,6 @@ export class RealtimeSyncManager {
     try {
       const message = JSON.parse(data) as WebSocketMessage;
 
-      // Handle last_trade_price updates
       if (message.asset_id && message.price !== undefined) {
         const tokenId = message.asset_id;
         const marketId = this.tokenToMarket.get(tokenId);
@@ -228,16 +227,23 @@ export class RealtimeSyncManager {
   }
 
   /**
-   * Flush buffered prices to database
+   * Flush buffered prices to database.
+   * (#6) Takes a snapshot first; clears only on success so failures retain data.
    */
   private async flushPrices(): Promise<void> {
     if (this.priceBuffer.size === 0) {
       return;
     }
 
+    // Soft cap warning
+    if (this.priceBuffer.size > BUFFER_SIZE_WARNING) {
+      this.logger.warn({ size: this.priceBuffer.size }, 'Price buffer growing large');
+    }
+
     const db = getDb();
-    const updates = Array.from(this.priceBuffer.values());
-    this.priceBuffer.clear();
+    // Snapshot current entries
+    const snapshot = new Map(this.priceBuffer);
+    const updates = Array.from(snapshot.values());
 
     const startTime = Date.now();
 
@@ -250,9 +256,7 @@ export class RealtimeSyncManager {
         marketUpdates.set(update.marketId, existing);
       }
 
-      // Update market prices and insert price history
       for (const [marketId, priceUpdates] of marketUpdates) {
-        // Get current market data
         const market = await db.query.markets.findFirst({
           where: eq(markets.id, marketId),
           columns: {
@@ -266,7 +270,6 @@ export class RealtimeSyncManager {
         const tokenIds = market.outcomeTokenIds as string[];
         const newPrices = [...(market.outcomePrices as number[])];
 
-        // Update prices for each token
         for (const update of priceUpdates) {
           const tokenIndex = tokenIds.indexOf(update.tokenId);
           if (tokenIndex !== -1) {
@@ -283,17 +286,21 @@ export class RealtimeSyncManager {
           });
         }
 
-        // Calculate last trade price (use first outcome price)
-        const lastTradePrice = newPrices[0] ?? null;
-
-        // Update market
+        // (#7) Update outcomePrices only — do NOT overwrite lastTradePrice.
+        // WS "last_trade_price" channel gives per-token prices, not a
+        // market-level last-trade value. lastTradePrice should only be set
+        // from verified trade records.
         await db.update(markets)
           .set({
             outcomePrices: newPrices,
-            lastTradePrice,
             priceUpdatedAt: new Date(),
           })
           .where(eq(markets.id, marketId));
+      }
+
+      // Clear only the entries we successfully flushed (#6)
+      for (const key of snapshot.keys()) {
+        this.priceBuffer.delete(key);
       }
 
       this.logger.debug({
@@ -303,26 +310,33 @@ export class RealtimeSyncManager {
       }, 'Flushed price updates');
 
     } catch (error) {
-      this.logger.error({ error }, 'Failed to flush prices');
+      this.logger.error({ error }, 'Failed to flush prices, will retry next interval');
+      // Buffer is intentionally preserved for retry
     }
   }
 
   /**
-   * Schedule a reconnection attempt
+   * (#9) Schedule a reconnection attempt.
+   * After max fast-backoff attempts, keeps retrying at a slower 60s interval
+   * instead of giving up permanently.
    */
   private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.config.wsMaxReconnectAttempts) {
-      this.logger.error('Max reconnect attempts reached');
-      return;
-    }
-
     this.reconnectAttempts++;
-    const delay = Math.min(
-      this.config.wsReconnectInterval * Math.pow(2, this.reconnectAttempts - 1),
-      30000
-    );
+    const isPastMax = this.reconnectAttempts > this.config.wsMaxReconnectAttempts;
 
-    this.logger.info({ attempt: this.reconnectAttempts, delay }, 'Scheduling reconnect');
+    // Fast exponential backoff up to max, then slow fixed interval
+    const delay = isPastMax
+      ? 60_000
+      : Math.min(this.config.wsReconnectInterval * Math.pow(2, this.reconnectAttempts - 1), 30_000);
+
+    if (isPastMax) {
+      // Log periodically, not every attempt
+      if (this.reconnectAttempts % 10 === 0) {
+        this.logger.error({ attempt: this.reconnectAttempts }, 'WebSocket still reconnecting at slow interval');
+      }
+    } else {
+      this.logger.info({ attempt: this.reconnectAttempts, delay }, 'Scheduling reconnect');
+    }
 
     setTimeout(async () => {
       if (this.shouldReconnect && !this.isConnected) {
@@ -330,17 +344,40 @@ export class RealtimeSyncManager {
           await this.connect();
         } catch (error) {
           this.logger.error({ error }, 'Reconnection failed');
+          // The 'close' handler will call scheduleReconnect again
         }
       }
     }, delay);
   }
 
   /**
-   * Resubscribe to all tokens (after market sync)
+   * Resubscribe to all tokens (after market sync adds new markets)
    */
   async resubscribe(): Promise<void> {
     await this.loadActiveTokens();
     this.subscribeToTokens();
+  }
+
+  /**
+   * Persist WS connection status into sync_state for health checks
+   */
+  private updatePricesSyncState(status: string): void {
+    const db = getDb();
+    db.insert(syncState)
+      .values({
+        entity: 'prices',
+        status,
+        lastSyncAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: syncState.entity,
+        set: {
+          status,
+          lastSyncAt: new Date(),
+          updatedAt: new Date(),
+        },
+      })
+      .catch(err => this.logger.debug({ err }, 'Failed to update prices sync state'));
   }
 
   /**
@@ -350,11 +387,13 @@ export class RealtimeSyncManager {
     isConnected: boolean;
     subscribedTokens: number;
     bufferedUpdates: number;
+    reconnectAttempts: number;
   } {
     return {
       isConnected: this.isConnected,
       subscribedTokens: this.subscribedTokens.size,
       bufferedUpdates: this.priceBuffer.size,
+      reconnectAttempts: this.reconnectAttempts,
     };
   }
 }

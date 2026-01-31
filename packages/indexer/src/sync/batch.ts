@@ -1,10 +1,20 @@
 /**
  * Batch sync manager - periodic polling of APIs
  * Optimized for high volume: ~26,000 markets, ~7,000 events
+ *
+ * Fixes applied:
+ * - #1  Batched multi-row upserts instead of per-row INSERTs
+ * - #2  Per-entity sync locks (events, markets, trades independent)
+ * - #3  Trades sync wired into periodic loop
+ * - #5  onMarketsSynced callback for WS resubscribe
+ * - #10 searchVector computed on upsert
+ * - #11 Targeted cache invalidation (not global wipe)
+ * - #17 Single source of truth for market data (markets sync only)
  */
 
-import { eq, sql } from 'drizzle-orm';
-import { createGammaClient, type GammaMarket, type GammaEvent, type GammaMarketRaw } from '@app/api/gamma';
+import { createHash } from 'node:crypto';
+import { eq, desc, sql } from 'drizzle-orm';
+import { createGammaClient, type GammaMarket, type GammaEvent } from '@app/api/gamma';
 import { createClobClient } from '@app/api/clob';
 import { getDb, markets, events, syncState, type NewMarket, type NewEvent } from '../db';
 import { getConfig } from '../lib/config';
@@ -17,10 +27,25 @@ export class BatchSyncManager {
   private clobClient = createClobClient();
   private config = getConfig();
   private intervals: NodeJS.Timeout[] = [];
-  private isSyncing = false;
+
+  // Per-entity sync locks (#2)
+  private isSyncingEvents = false;
+  private isSyncingMarkets = false;
+  private isSyncingTrades = false;
+
   private lastSyncAt: Date | null = null;
   private syncError: string | null = null;
-  private syncProgress = { markets: 0, events: 0 };
+  private syncProgress = { markets: 0, events: 0, trades: 0 };
+
+  // Cached event→market linkages from last events sync (#17)
+  private eventMarketPairs: Array<{ marketId: string; eventId: string }> = [];
+
+  // Callback fired after markets sync succeeds (#5)
+  private onMarketsSynced?: () => Promise<void>;
+
+  setOnMarketsSynced(callback: () => Promise<void>): void {
+    this.onMarketsSynced = callback;
+  }
 
   /**
    * Run initial full sync of all data
@@ -33,6 +58,9 @@ export class BatchSyncManager {
 
     // Then sync markets
     await this.syncMarkets();
+
+    // Re-apply event→market linkages now that markets exist
+    await this.applyEventMarketLinks();
 
     this.logger.info('Initial sync completed');
   }
@@ -59,8 +87,16 @@ export class BatchSyncManager {
       this.intervals.push(eventsInterval);
     }, this.config.marketsSyncInterval / 2);
 
+    // Trades sync on its own interval (#3)
+    const tradesInterval = setInterval(
+      () => this.syncAllTrades(),
+      this.config.tradesSyncInterval
+    );
+    this.intervals.push(tradesInterval);
+
     this.logger.info({
       marketsSyncInterval: this.config.marketsSyncInterval,
+      tradesSyncInterval: this.config.tradesSyncInterval,
     }, 'Periodic sync started');
   }
 
@@ -73,26 +109,24 @@ export class BatchSyncManager {
     this.logger.info('Periodic sync stopped');
   }
 
-  /**
-   * Sync events from Gamma API
-   */
+  // ─── Events ──────────────────────────────────────────────
+
   async syncEvents(): Promise<void> {
-    if (this.isSyncing) {
-      this.logger.warn('Sync already in progress, skipping events sync');
+    if (this.isSyncingEvents) {
+      this.logger.warn('Events sync already in progress, skipping');
       return;
     }
 
-    this.isSyncing = true;
+    this.isSyncingEvents = true;
     this.syncError = null;
     this.syncProgress.events = 0;
+    this.eventMarketPairs = [];
 
-    const db = getDb();
     const startTime = Date.now();
-    const FETCH_BATCH_SIZE = 500;
+    const FETCH_BATCH_SIZE = this.config.marketsBatchSize;
 
     try {
       await this.updateSyncState('events', 'syncing');
-
       this.logger.info('Syncing events from Gamma API');
 
       let totalEvents = 0;
@@ -108,38 +142,37 @@ export class BatchSyncManager {
 
           if (batch.length === 0) break;
 
-          // Upsert immediately
-          await this.upsertEvents(batch);
+          const batchStart = Date.now();
+          await this.upsertEventsBatch(batch);
+          this.collectEventMarketPairs(batch);
+          this.logger.debug({ batchSize: batch.length, durationMs: Date.now() - batchStart }, 'Events batch upserted');
 
           offset += batch.length;
           totalEvents += batch.length;
           this.syncProgress.events = totalEvents;
 
-          // Log progress every 1000 events
           if (totalEvents % 1000 === 0 || batch.length < FETCH_BATCH_SIZE) {
             this.logger.info({ synced: totalEvents }, 'Events sync progress');
           }
 
           if (batch.length < FETCH_BATCH_SIZE) break;
-
-          // Small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 50));
         }
       };
 
-      // Fetch open and closed events to keep totals accurate
       await fetchByFilter({ closed: false });
       await fetchByFilter({ closed: true });
 
+      // Link markets to events (works for markets that already exist)
+      await this.applyEventMarketLinks();
+
       await this.updateSyncState('events', 'idle', { count: totalEvents, durationMs: Date.now() - startTime });
 
-      // Invalidate cache after successful sync
-      await invalidateCache('neomarket:cache:*');
+      // Targeted invalidation (#11)
+      await invalidateCache('neomarket:cache:GET:/events*');
+      await invalidateCache('neomarket:cache:GET:/stats*');
 
-      this.logger.info({
-        totalEvents,
-        durationMs: Date.now() - startTime,
-      }, 'Events sync completed');
+      this.logger.info({ totalEvents, durationMs: Date.now() - startTime }, 'Events sync completed');
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -147,30 +180,27 @@ export class BatchSyncManager {
       this.logger.error({ error: errorMessage }, 'Events sync failed');
       await this.updateSyncState('events', 'error', null, errorMessage);
     } finally {
-      this.isSyncing = false;
+      this.isSyncingEvents = false;
     }
   }
 
-  /**
-   * Sync markets from Gamma API
-   */
+  // ─── Markets ─────────────────────────────────────────────
+
   async syncMarkets(): Promise<void> {
-    if (this.isSyncing) {
-      this.logger.warn('Sync already in progress, skipping markets sync');
+    if (this.isSyncingMarkets) {
+      this.logger.warn('Markets sync already in progress, skipping');
       return;
     }
 
-    this.isSyncing = true;
+    this.isSyncingMarkets = true;
     this.syncError = null;
     this.syncProgress.markets = 0;
 
-    const db = getDb();
     const startTime = Date.now();
-    const FETCH_BATCH_SIZE = 500;
+    const FETCH_BATCH_SIZE = this.config.marketsBatchSize;
 
     try {
       await this.updateSyncState('markets', 'syncing');
-
       this.logger.info('Syncing markets from Gamma API');
 
       let totalMarkets = 0;
@@ -186,39 +216,41 @@ export class BatchSyncManager {
 
           if (batch.length === 0) break;
 
-          // Upsert immediately to avoid memory buildup
-          await this.upsertMarkets(batch);
+          const batchStart = Date.now();
+          await this.upsertMarketsBatch(batch);
+          this.logger.debug({ batchSize: batch.length, durationMs: Date.now() - batchStart }, 'Markets batch upserted');
 
           offset += batch.length;
           totalMarkets += batch.length;
           this.syncProgress.markets = totalMarkets;
 
-          // Log progress every 2000 markets
           if (totalMarkets % 2000 === 0 || batch.length < FETCH_BATCH_SIZE) {
             this.logger.info({ synced: totalMarkets }, 'Markets sync progress');
           }
 
           if (batch.length < FETCH_BATCH_SIZE) break;
-
-          // Small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 50));
         }
       };
 
-      // Fetch open and closed markets for full dataset
       await fetchByFilter({ closed: false });
       await fetchByFilter({ closed: true });
 
       await this.updateSyncState('markets', 'idle', { count: totalMarkets, durationMs: Date.now() - startTime });
 
-      // Invalidate cache after successful sync
-      await invalidateCache('neomarket:cache:*');
+      // Targeted invalidation (#11)
+      await invalidateCache('neomarket:cache:GET:/markets*');
+      await invalidateCache('neomarket:cache:GET:/stats*');
 
       this.lastSyncAt = new Date();
-      this.logger.info({
-        totalMarkets,
-        durationMs: Date.now() - startTime,
-      }, 'Markets sync completed');
+      this.logger.info({ totalMarkets, durationMs: Date.now() - startTime }, 'Markets sync completed');
+
+      // Notify listeners (e.g. WS resubscribe) (#5)
+      if (this.onMarketsSynced) {
+        this.onMarketsSynced().catch(err =>
+          this.logger.error({ err }, 'Post-markets-sync callback failed')
+        );
+      }
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -226,13 +258,122 @@ export class BatchSyncManager {
       this.logger.error({ error: errorMessage }, 'Markets sync failed');
       await this.updateSyncState('markets', 'error', null, errorMessage);
     } finally {
-      this.isSyncing = false;
+      this.isSyncingMarkets = false;
+    }
+  }
+
+  // ─── Trades (#3) ─────────────────────────────────────────
+
+  async syncAllTrades(): Promise<void> {
+    if (this.isSyncingTrades) {
+      this.logger.warn('Trades sync already in progress, skipping');
+      return;
+    }
+
+    this.isSyncingTrades = true;
+    this.syncProgress.trades = 0;
+    const startTime = Date.now();
+
+    try {
+      await this.updateSyncState('trades', 'syncing');
+      const db = getDb();
+
+      // Top active markets by 24h volume
+      const activeMarkets = await db.query.markets.findMany({
+        where: eq(markets.active, true),
+        orderBy: [desc(markets.volume24hr)],
+        limit: this.config.tradesSyncMarketLimit,
+        columns: { id: true, outcomeTokenIds: true },
+      });
+
+      let totalTrades = 0;
+      let synced = 0;
+
+      for (const market of activeMarkets) {
+        const tokenIds = market.outcomeTokenIds as string[];
+        for (const tokenId of tokenIds) {
+          const result = await this.syncTrades(tokenId, market.id);
+          totalTrades += result.count;
+          // Rate limit between API calls
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        synced++;
+        this.syncProgress.trades = synced;
+      }
+
+      await this.updateSyncState('trades', 'idle', {
+        count: totalTrades,
+        marketsProcessed: activeMarkets.length,
+        durationMs: Date.now() - startTime,
+      });
+
+      this.logger.info({
+        totalTrades,
+        marketsProcessed: activeMarkets.length,
+        durationMs: Date.now() - startTime,
+      }, 'Trades sync completed');
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error({ error: errorMessage }, 'Trades sync failed');
+      await this.updateSyncState('trades', 'error', null, errorMessage);
+    } finally {
+      this.isSyncingTrades = false;
     }
   }
 
   /**
-   * Update sync state in database
+   * Sync trades from CLOB API for a specific market token
    */
+  async syncTrades(tokenId: string, marketId: string): Promise<{ success: boolean; count: number }> {
+    const db = getDb();
+
+    try {
+      const trades = await this.clobClient.getTrades(tokenId, this.config.tradesBatchSize);
+
+      for (const trade of trades) {
+        // Deterministic fallback ID: hash a composite of all distinguishing fields
+        // to avoid collisions from the weak asset_id-timestamp pair.
+        const tradeId = trade.id ?? createHash('sha256')
+          .update([
+            trade.asset_id,
+            trade.side,
+            trade.price,
+            trade.size,
+            trade.timestamp ?? '',
+            trade.taker_order_id ?? '',
+            trade.transaction_hash ?? '',
+          ].join('|'))
+          .digest('hex');
+
+        await db.execute(sql`
+          INSERT INTO trades (id, market_id, token_id, side, price, size, timestamp, taker_order_id, transaction_hash, fee_rate_bps)
+          VALUES (
+            ${tradeId},
+            ${marketId},
+            ${trade.asset_id},
+            ${trade.side},
+            ${parseFloat(trade.price)},
+            ${parseFloat(trade.size)},
+            ${trade.timestamp ? new Date(trade.timestamp) : new Date()},
+            ${trade.taker_order_id ?? null},
+            ${trade.transaction_hash ?? null},
+            ${trade.fee_rate_bps ? parseInt(trade.fee_rate_bps, 10) : null}
+          )
+          ON CONFLICT (id) DO NOTHING
+        `);
+      }
+
+      this.logger.debug({ tokenId, count: trades.length }, 'Synced trades');
+      return { success: true, count: trades.length };
+    } catch (error) {
+      this.logger.error({ tokenId, error }, 'Failed to sync trades');
+      return { success: false, count: 0 };
+    }
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────
+
   private async updateSyncState(
     entity: string,
     status: string,
@@ -261,247 +402,188 @@ export class BatchSyncManager {
   }
 
   /**
-   * Upsert events into database (also extracts and links nested markets)
+   * Batch upsert events (#1). Writes events only — does not touch markets table.
    */
-  private async upsertEvents(gammaEvents: GammaEvent[]): Promise<void> {
+  private async upsertEventsBatch(gammaEvents: GammaEvent[]): Promise<void> {
+    if (gammaEvents.length === 0) return;
     const db = getDb();
 
+    const values: NewEvent[] = gammaEvents.map(event => ({
+      id: event.id,
+      title: event.title,
+      slug: event.slug,
+      description: event.description,
+      image: event.image,
+      icon: event.icon,
+      endDate: event.end_date ? new Date(event.end_date) : undefined,
+      volume: event.volume ?? 0,
+      volume24hr: event.volume24hr ?? 0,
+      liquidity: event.liquidity ?? 0,
+      active: event.active ?? true,
+      closed: event.closed ?? false,
+      archived: event.archived ?? false,
+      updatedAt: new Date(),
+    }));
+
+    await db.insert(events)
+      .values(values)
+      .onConflictDoUpdate({
+        target: events.id,
+        set: {
+          title: sql`excluded.title`,
+          slug: sql`excluded.slug`,
+          description: sql`excluded.description`,
+          image: sql`excluded.image`,
+          icon: sql`excluded.icon`,
+          endDate: sql`excluded.end_date`,
+          volume: sql`excluded.volume`,
+          volume24hr: sql`excluded.volume_24hr`,
+          liquidity: sql`excluded.liquidity`,
+          active: sql`excluded.active`,
+          closed: sql`excluded.closed`,
+          archived: sql`excluded.archived`,
+          updatedAt: sql`excluded.updated_at`,
+        },
+      });
+
+    // Compute search vectors (#10)
+    const ids = gammaEvents.map(e => e.id);
+    await db.execute(sql`
+      UPDATE events
+      SET search_vector = to_tsvector('english', title || ' ' || coalesce(description, ''))
+      WHERE id = ANY(${ids})
+    `);
+  }
+
+  /**
+   * Collect event→market pairs for eventId linking (#17).
+   *
+   * Relies on the `markets` array nested in Gamma event responses.
+   * The Gamma /events endpoint includes nested markets by default.
+   * If the array is absent for an event, we log a warning — there is
+   * no alternative Gamma endpoint that provides event→market mappings.
+   */
+  private collectEventMarketPairs(gammaEvents: GammaEvent[]): void {
+    let missingCount = 0;
     for (const event of gammaEvents) {
-      const newEvent: NewEvent = {
-        id: event.id,
-        title: event.title,
-        slug: event.slug,
-        description: event.description,
-        image: event.image,
-        icon: event.icon,
-        endDate: event.end_date ? new Date(event.end_date) : undefined,
-        volume: event.volume ?? 0,
-        volume24hr: event.volume24hr ?? 0,
-        liquidity: event.liquidity ?? 0,
-        active: event.active ?? true,
-        closed: event.closed ?? false,
-        archived: event.archived ?? false,
-        updatedAt: new Date(),
-      };
-
-      await db.insert(events)
-        .values(newEvent)
-        .onConflictDoUpdate({
-          target: events.id,
-          set: {
-            title: newEvent.title,
-            slug: newEvent.slug,
-            description: newEvent.description,
-            image: newEvent.image,
-            icon: newEvent.icon,
-            endDate: newEvent.endDate,
-            volume: newEvent.volume,
-            volume24hr: newEvent.volume24hr,
-            liquidity: newEvent.liquidity,
-            active: newEvent.active,
-            closed: newEvent.closed,
-            archived: newEvent.archived,
-            updatedAt: new Date(),
-          },
-        });
-
-      // Also upsert nested markets with event_id linkage
-      if (event.markets && event.markets.length > 0) {
-        for (const rawMarket of event.markets) {
-          await this.upsertMarketFromEvent(rawMarket, event.id);
+      const nested = event.markets;
+      if (!nested || nested.length === 0) {
+        missingCount++;
+        continue;
+      }
+      for (const market of nested) {
+        if (market.id) {
+          this.eventMarketPairs.push({ marketId: market.id, eventId: event.id });
         }
       }
     }
+    if (missingCount > 0) {
+      this.logger.warn(
+        { missingCount, total: gammaEvents.length },
+        'Some events had no nested markets — their markets will not be linked'
+      );
+    }
   }
 
   /**
-   * Upsert a single market from an event (with event_id linkage)
+   * Apply cached event→market linkages via batch UPDATE (#17)
    */
-  private async upsertMarketFromEvent(rawMarket: GammaMarketRaw, eventId: string): Promise<void> {
+  private async applyEventMarketLinks(): Promise<void> {
+    if (this.eventMarketPairs.length === 0) return;
     const db = getDb();
 
-    // Parse JSON strings safely
-    let outcomeNames: string[] = [];
-    let outcomePrices: number[] = [];
-    let tokenIds: string[] = [];
-
-    try {
-      outcomeNames = JSON.parse(rawMarket.outcomes);
-    } catch {
-      outcomeNames = ['Yes', 'No'];
+    const chunkSize = 5000;
+    for (let i = 0; i < this.eventMarketPairs.length; i += chunkSize) {
+      const chunk = this.eventMarketPairs.slice(i, i + chunkSize);
+      const valuesSql = chunk.map(p => sql`(${p.marketId}::text, ${p.eventId}::text)`);
+      const valuesList = sql.join(valuesSql, sql`, `);
+      await db.execute(sql`
+        UPDATE markets m SET event_id = v.event_id
+        FROM (VALUES ${valuesList}) AS v(market_id, event_id)
+        WHERE m.id = v.market_id
+      `);
     }
+  }
 
-    try {
-      if (rawMarket.outcomePrices) {
-        const prices = JSON.parse(rawMarket.outcomePrices);
-        outcomePrices = prices.map((p: string) => parseFloat(p) || 0);
-      }
-    } catch {
-      outcomePrices = [];
-    }
+  /**
+   * Batch upsert markets (#1). Single source of truth for market data (#17).
+   * Does NOT overwrite event_id — that is managed by events sync.
+   */
+  private async upsertMarketsBatch(gammaMarkets: GammaMarket[]): Promise<void> {
+    if (gammaMarkets.length === 0) return;
+    const db = getDb();
 
-    try {
-      if (rawMarket.clobTokenIds) {
-        tokenIds = JSON.parse(rawMarket.clobTokenIds);
-      }
-    } catch {
-      tokenIds = [];
-    }
-
-    const newMarket: NewMarket = {
-      id: rawMarket.id,
-      eventId, // Link to parent event
-      conditionId: rawMarket.conditionId,
-      question: rawMarket.question,
-      description: rawMarket.description ?? undefined,
-      slug: rawMarket.slug ?? undefined,
-      outcomes: outcomeNames,
-      outcomeTokenIds: tokenIds,
-      outcomePrices: outcomePrices,
-      volume: rawMarket.volumeNum ?? 0,
-      volume24hr: rawMarket.volume24hr ?? 0,
-      liquidity: rawMarket.liquidityNum ?? 0,
-      image: rawMarket.image ?? undefined,
-      icon: rawMarket.icon ?? undefined,
-      category: rawMarket.category ?? undefined,
-      endDateIso: rawMarket.endDateIso ?? undefined,
-      active: rawMarket.active ?? true,
-      closed: rawMarket.closed ?? false,
-      archived: rawMarket.archived ?? false,
+    const values: NewMarket[] = gammaMarkets.map(market => ({
+      id: market.id,
+      conditionId: market.condition_id,
+      question: market.question,
+      description: market.description,
+      slug: market.slug,
+      outcomes: market.outcomes.map(o => o.outcome),
+      outcomeTokenIds: market.tokens?.map(t => t.token_id) ?? [],
+      outcomePrices: market.outcomes.map(o => o.price ?? 0),
+      volume: market.volume ?? 0,
+      volume24hr: market.volume_24hr ?? 0,
+      liquidity: market.liquidity ?? 0,
+      image: market.image,
+      icon: market.icon,
+      category: market.category,
+      endDateIso: market.end_date_iso,
+      active: market.active ?? true,
+      closed: market.closed ?? false,
+      archived: market.archived ?? false,
       updatedAt: new Date(),
-    };
+    }));
 
     await db.insert(markets)
-      .values(newMarket)
+      .values(values)
       .onConflictDoUpdate({
         target: markets.id,
         set: {
-          eventId: newMarket.eventId,
-          question: newMarket.question,
-          description: newMarket.description,
-          slug: newMarket.slug,
-          outcomes: newMarket.outcomes,
-          outcomeTokenIds: newMarket.outcomeTokenIds,
-          outcomePrices: newMarket.outcomePrices,
-          volume: newMarket.volume,
-          volume24hr: newMarket.volume24hr,
-          liquidity: newMarket.liquidity,
-          image: newMarket.image,
-          icon: newMarket.icon,
-          category: newMarket.category,
-          endDateIso: newMarket.endDateIso,
-          active: newMarket.active,
-          closed: newMarket.closed,
-          archived: newMarket.archived,
-          updatedAt: new Date(),
+          question: sql`excluded.question`,
+          description: sql`excluded.description`,
+          slug: sql`excluded.slug`,
+          outcomes: sql`excluded.outcomes`,
+          outcomeTokenIds: sql`excluded.outcome_token_ids`,
+          outcomePrices: sql`excluded.outcome_prices`,
+          volume: sql`excluded.volume`,
+          volume24hr: sql`excluded.volume_24hr`,
+          liquidity: sql`excluded.liquidity`,
+          image: sql`excluded.image`,
+          icon: sql`excluded.icon`,
+          category: sql`excluded.category`,
+          endDateIso: sql`excluded.end_date_iso`,
+          active: sql`excluded.active`,
+          closed: sql`excluded.closed`,
+          archived: sql`excluded.archived`,
+          updatedAt: sql`excluded.updated_at`,
         },
       });
-  }
 
-  /**
-   * Upsert markets into database
-   */
-  private async upsertMarkets(gammaMarkets: GammaMarket[]): Promise<void> {
-    const db = getDb();
-
-    for (const market of gammaMarkets) {
-      const newMarket: NewMarket = {
-        id: market.id,
-        conditionId: market.condition_id,
-        question: market.question,
-        description: market.description,
-        slug: market.slug,
-        outcomes: market.outcomes.map(o => o.outcome),
-        outcomeTokenIds: market.tokens?.map(t => t.token_id) ?? [],
-        outcomePrices: market.outcomes.map(o => o.price ?? 0),
-        volume: market.volume ?? 0,
-        volume24hr: market.volume_24hr ?? 0,
-        liquidity: market.liquidity ?? 0,
-        image: market.image,
-        icon: market.icon,
-        category: market.category,
-        endDateIso: market.end_date_iso,
-        active: market.active ?? true,
-        closed: market.closed ?? false,
-        archived: market.archived ?? false,
-        updatedAt: new Date(),
-      };
-
-      await db.insert(markets)
-        .values(newMarket)
-        .onConflictDoUpdate({
-          target: markets.id,
-          set: {
-            question: newMarket.question,
-            description: newMarket.description,
-            slug: newMarket.slug,
-            outcomes: newMarket.outcomes,
-            outcomeTokenIds: newMarket.outcomeTokenIds,
-            outcomePrices: newMarket.outcomePrices,
-            volume: newMarket.volume,
-            volume24hr: newMarket.volume24hr,
-            liquidity: newMarket.liquidity,
-            image: newMarket.image,
-            icon: newMarket.icon,
-            category: newMarket.category,
-            endDateIso: newMarket.endDateIso,
-            active: newMarket.active,
-            closed: newMarket.closed,
-            archived: newMarket.archived,
-            updatedAt: new Date(),
-          },
-        });
-    }
-  }
-
-  /**
-   * Sync trades from CLOB API for a specific market
-   * Returns result so callers can detect failure without crashing the sync loop
-   */
-  async syncTrades(tokenId: string, marketId: string): Promise<{ success: boolean; count: number }> {
-    const db = getDb();
-
-    try {
-      const trades = await this.clobClient.getTrades(tokenId, this.config.tradesBatchSize);
-
-      for (const trade of trades) {
-        await db.execute(sql`
-          INSERT INTO trades (id, market_id, token_id, side, price, size, timestamp, taker_order_id, transaction_hash, fee_rate_bps)
-          VALUES (
-            ${trade.id ?? `${trade.asset_id}-${trade.timestamp}`},
-            ${marketId},
-            ${trade.asset_id},
-            ${trade.side},
-            ${parseFloat(trade.price)},
-            ${parseFloat(trade.size)},
-            ${trade.timestamp ? new Date(trade.timestamp) : new Date()},
-            ${trade.taker_order_id ?? null},
-            ${trade.transaction_hash ?? null},
-            ${trade.fee_rate_bps ? parseInt(trade.fee_rate_bps, 10) : null}
-          )
-          ON CONFLICT (id) DO NOTHING
-        `);
-      }
-
-      this.logger.debug({ tokenId, count: trades.length }, 'Synced trades');
-      return { success: true, count: trades.length };
-    } catch (error) {
-      this.logger.error({ tokenId, error }, 'Failed to sync trades');
-      return { success: false, count: 0 };
-    }
+    // Compute search vectors (#10)
+    const ids = gammaMarkets.map(m => m.id);
+    await db.execute(sql`
+      UPDATE markets
+      SET search_vector = to_tsvector('english', question || ' ' || coalesce(description, ''))
+      WHERE id = ANY(${ids})
+    `);
   }
 
   /**
    * Get sync status
    */
   getStatus(): {
-    isSyncing: boolean;
+    isSyncing: { events: boolean; markets: boolean; trades: boolean };
     lastSyncAt: Date | null;
     error: string | null;
-    progress: { markets: number; events: number };
+    progress: { markets: number; events: number; trades: number };
   } {
     return {
-      isSyncing: this.isSyncing,
+      isSyncing: {
+        events: this.isSyncingEvents,
+        markets: this.isSyncingMarkets,
+        trades: this.isSyncingTrades,
+      },
       lastSyncAt: this.lastSyncAt,
       error: this.syncError,
       progress: this.syncProgress,

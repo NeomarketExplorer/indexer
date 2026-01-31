@@ -1,5 +1,8 @@
 /**
  * Main entry point - runs both API server and sync worker
+ *
+ * Fix applied:
+ * - #19 Schema verification at startup
  */
 
 import { serve } from '@hono/node-server';
@@ -7,7 +10,7 @@ import { app } from './api';
 import { SyncOrchestrator } from './sync';
 import { getConfig } from './lib/config';
 import { getLogger } from './lib/logger';
-import { getDb, closeDb } from './db';
+import { getDb, closeDb, verifySchema } from './db';
 import { closeRedis } from './lib/redis';
 
 const logger = getLogger();
@@ -18,6 +21,13 @@ async function main() {
 
   // Ensure database is connected
   getDb();
+
+  // Verify schema exists (#19)
+  const schemaOk = await verifySchema();
+  if (!schemaOk) {
+    logger.fatal('Database schema not found. Run "pnpm db:migrate" before starting.');
+    process.exit(1);
+  }
 
   // Start API server first (so it's available during sync)
   const server = serve({

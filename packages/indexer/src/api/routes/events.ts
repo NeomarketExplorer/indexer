@@ -1,5 +1,8 @@
 /**
  * Events API endpoints
+ *
+ * Fix applied:
+ * - #18 Optional count via ?includeCount=false
  */
 
 import { Hono } from 'hono';
@@ -20,6 +23,7 @@ const ListEventsQuerySchema = z.object({
   sort: z.enum(['volume', 'volume_24hr', 'liquidity', 'created_at']).default('volume'),
   order: z.enum(['asc', 'desc']).default('desc'),
   search: z.string().optional(),
+  includeCount: z.enum(['true', 'false']).default('true'),
 });
 
 /**
@@ -32,7 +36,7 @@ eventsRouter.get('/', cached({ ttl: 60 }), async (c) => {
     return c.json({ error: 'Invalid query parameters', details: query.error.format() }, 400);
   }
 
-  const { limit, offset, active, closed, sort, order, search } = query.data;
+  const { limit, offset, active, closed, sort, order, search, includeCount } = query.data;
   const db = getDb();
 
   // Build where conditions
@@ -60,21 +64,25 @@ eventsRouter.get('/', cached({ ttl: 60 }), async (c) => {
 
   const orderBy = order === 'desc' ? desc(sortColumn) : asc(sortColumn);
 
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
   // Execute query
   const result = await db.query.events.findMany({
-    where: conditions.length > 0 ? and(...conditions) : undefined,
+    where: whereClause,
     orderBy: [orderBy],
     limit,
     offset,
   });
 
-  // Get total count
-  const countResult = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(events)
-    .where(conditions.length > 0 ? and(...conditions) : undefined);
-
-  const total = countResult[0]?.count ?? 0;
+  // (#18) Count is optional — skip on large datasets when not needed
+  let total: number | null = null;
+  if (includeCount === 'true') {
+    const countResult = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(events)
+      .where(whereClause);
+    total = countResult[0]?.count ?? 0;
+  }
 
   return c.json({
     data: result,
@@ -82,7 +90,7 @@ eventsRouter.get('/', cached({ ttl: 60 }), async (c) => {
       limit,
       offset,
       total,
-      hasMore: offset + result.length < total,
+      hasMore: total !== null ? offset + result.length < total : result.length === limit,
     },
   });
 });

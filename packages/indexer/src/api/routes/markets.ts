@@ -1,10 +1,14 @@
 /**
  * Markets API endpoints
+ *
+ * Fixes applied:
+ * - #4  POST /markets/prices uses inArray instead of raw IN
+ * - #18 Optional count via ?includeCount=false
  */
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq, desc, asc, and, sql } from 'drizzle-orm';
+import { eq, desc, asc, and, sql, inArray } from 'drizzle-orm';
 import { getDb, markets, priceHistory, trades } from '../../db';
 import { cached } from '../middleware/cache';
 import { ftsWhere } from '../../db/search';
@@ -21,6 +25,7 @@ const ListMarketsQuerySchema = z.object({
   sort: z.enum(['volume', 'volume_24hr', 'liquidity', 'created_at']).default('volume_24hr'),
   order: z.enum(['asc', 'desc']).default('desc'),
   search: z.string().optional(),
+  includeCount: z.enum(['true', 'false']).default('true'),
 });
 
 /**
@@ -33,7 +38,7 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
     return c.json({ error: 'Invalid query parameters', details: query.error.format() }, 400);
   }
 
-  const { limit, offset, active, closed, category, sort, order, search } = query.data;
+  const { limit, offset, active, closed, category, sort, order, search, includeCount } = query.data;
   const db = getDb();
 
   // Build where conditions
@@ -65,9 +70,11 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
 
   const orderBy = order === 'desc' ? desc(sortColumn) : asc(sortColumn);
 
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
   // Execute query
   const result = await db.query.markets.findMany({
-    where: conditions.length > 0 ? and(...conditions) : undefined,
+    where: whereClause,
     orderBy: [orderBy],
     limit,
     offset,
@@ -82,13 +89,15 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
     },
   });
 
-  // Get total count
-  const countResult = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(markets)
-    .where(conditions.length > 0 ? and(...conditions) : undefined);
-
-  const total = countResult[0]?.count ?? 0;
+  // (#18) Count is optional — skip on large datasets when not needed
+  let total: number | null = null;
+  if (includeCount === 'true') {
+    const countResult = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(markets)
+      .where(whereClause);
+    total = countResult[0]?.count ?? 0;
+  }
 
   return c.json({
     data: result,
@@ -96,7 +105,7 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
       limit,
       offset,
       total,
-      hasMore: offset + result.length < total,
+      hasMore: total !== null ? offset + result.length < total : result.length === limit,
     },
   });
 });
@@ -246,6 +255,7 @@ marketsRouter.get('/:id/trades', cached({ ttl: 15 }), async (c) => {
 
 /**
  * POST /markets/prices - Batch price lookup
+ * (#4) Uses inArray for safe parameterized IN query
  */
 marketsRouter.post('/prices', async (c) => {
   const body = await c.req.json<{ ids: string[] }>();
@@ -261,7 +271,7 @@ marketsRouter.post('/prices', async (c) => {
   const db = getDb();
 
   const result = await db.query.markets.findMany({
-    where: sql`${markets.id} IN ${body.ids}`,
+    where: inArray(markets.id, body.ids),
     columns: {
       id: true,
       outcomePrices: true,

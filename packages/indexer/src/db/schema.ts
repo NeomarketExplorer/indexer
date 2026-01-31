@@ -1,6 +1,24 @@
 /**
  * PostgreSQL schema for Polymarket indexer
  * Using Drizzle ORM
+ *
+ * NOTE — Financial column precision (real → numeric)
+ * ──────────────────────────────────────────────────
+ * Several columns (volume, liquidity, price, size, PnL, etc.) currently use
+ * `real` (float4, ~7 significant digits). For production financial accuracy
+ * these should be migrated to `numeric(20,8)`. This is intentionally deferred
+ * because it requires a table-rewrite ALTER that takes an ACCESS EXCLUSIVE lock
+ * on every affected table.
+ *
+ * Follow-up plan:
+ *   Phase 1 — Run `ALTER TABLE ... ALTER COLUMN ... TYPE numeric(20,8)` in a
+ *             maintenance window against events, markets, trades, price_history,
+ *             wallets, and positions. Largest tables first (price_history, trades).
+ *   Phase 2 — Update this schema file: replace `real(...)` with
+ *             `numeric('col', { precision: 20, scale: 8 })`.
+ *   Phase 3 — Validate that Drizzle ORM returns `number` (not `string`) for
+ *             numeric columns, or add `.mapWith(Number)` as needed.
+ *   Estimated risk: low data-loss risk (widening), moderate downtime risk (lock).
  */
 
 import {
@@ -188,7 +206,8 @@ export const trades = pgTable('trades', {
 ]);
 
 // ============================================
-// WALLETS (for future user tracking)
+// WALLETS — reserved for future user tracking.
+// Not populated by any sync code yet.
 // ============================================
 
 export const wallets = pgTable('wallets', {
@@ -212,7 +231,8 @@ export const wallets = pgTable('wallets', {
 ]);
 
 // ============================================
-// POSITIONS
+// POSITIONS — reserved for future user tracking.
+// Not populated by any sync code yet.
 // ============================================
 
 export const positions = pgTable('positions', {

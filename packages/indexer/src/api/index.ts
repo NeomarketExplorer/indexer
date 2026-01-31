@@ -1,5 +1,8 @@
 /**
  * Hono API router
+ *
+ * Fix applied:
+ * - #12 Rate limiting middleware on heavy endpoints
  */
 
 import { Hono } from 'hono';
@@ -14,6 +17,7 @@ import { statsRouter } from './routes/stats';
 import { healthRouter } from './routes/health';
 import { getLogger } from '../lib/logger';
 import { getConfig } from '../lib/config';
+import { rateLimit } from './middleware/rateLimit';
 
 export type AppEnv = {
   // Add bindings/variables here if needed
@@ -32,6 +36,13 @@ app.use('*', cors({
 app.use('*', timing());
 app.use('*', prettyJSON());
 app.use('*', honoLogger());
+
+// Rate limit on heavy endpoints (#12)
+const rl = rateLimit({ max: config.rateLimitMax, windowMs: config.rateLimitWindowMs });
+app.use('/markets/*', rl);
+app.use('/markets', rl);
+app.use('/events/*', rl);
+app.use('/events', rl);
 
 // Routes
 app.route('/health', healthRouter);
