@@ -1,0 +1,27 @@
+{
+  "name": "neomarket-indexer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @app/indexer dev",
+    "start": "pnpm --filter @app/indexer start",
+    "build": "pnpm --filter @app/indexer build",
+    "typecheck": "pnpm --filter @app/indexer typecheck",
+    "lint": "pnpm --filter @app/indexer lint",
+    "test": "pnpm --filter @app/indexer test",
+    "db:generate": "pnpm --filter @app/indexer db:generate",
+    "db:migrate": "pnpm --filter @app/indexer db:migrate",
+    "db:push": "pnpm --filter @app/indexer db:push",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "docker:rebuild": "docker compose down && docker compose up -d --build"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  },
+  "packageManager": "pnpm@10.28.1",
+  "engines": {
+    "node": ">=18"
+  }
+}

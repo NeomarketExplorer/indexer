@@ -1,0 +1,30 @@
+# Dependencies
+node_modules
+**/node_modules
+
+# Build outputs
+dist
+**/dist
+
+# Development
+.git
+.gitignore
+*.md
+.env*.local
+.logs
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Testing
+coverage
+**/*.test.ts
+**/*.spec.ts
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore

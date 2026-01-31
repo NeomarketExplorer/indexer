@@ -1,0 +1,58 @@
+{
+  "name": "@app/indexer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./server": {
+      "types": "./src/server.ts",
+      "default": "./src/server.ts"
+    },
+    "./worker": {
+      "types": "./src/worker.ts",
+      "default": "./src/worker.ts"
+    },
+    "./db": {
+      "types": "./src/db/index.ts",
+      "default": "./src/db/index.ts"
+    }
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "server": "tsx src/server.ts",
+    "worker": "tsx src/worker.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@app/api": "workspace:*",
+    "@app/config": "workspace:*",
+    "@hono/node-server": "^1.13.0",
+    "drizzle-orm": "^0.36.0",
+    "hono": "^4.6.0",
+    "postgres": "^3.4.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "drizzle-kit": "^0.28.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.1.0"
+  }
+}

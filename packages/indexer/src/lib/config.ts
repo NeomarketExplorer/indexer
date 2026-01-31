@@ -1,0 +1,93 @@
+/**
+ * Indexer configuration with Zod validation
+ */
+
+import { z } from 'zod';
+
+const ConfigSchema = z.object({
+  // Database
+  databaseUrl: z.string().url().default('postgresql://postgres:postgres@localhost:5432/polymarket'),
+
+  // Server
+  port: z.coerce.number().int().positive().default(3001),
+  host: z.string().default('0.0.0.0'),
+
+  // Sync intervals (in milliseconds)
+  marketsSyncInterval: z.coerce.number().int().positive().default(5 * 60 * 1000), // 5 minutes
+  tradesSyncInterval: z.coerce.number().int().positive().default(60 * 1000), // 1 minute
+  priceFlushInterval: z.coerce.number().int().positive().default(1000), // 1 second
+
+  // WebSocket
+  wsUrl: z.string().url().default('wss://ws-subscriptions-clob.polymarket.com/ws'),
+  wsReconnectInterval: z.coerce.number().int().positive().default(3000),
+  wsMaxReconnectAttempts: z.coerce.number().int().positive().default(10),
+
+  // API URLs
+  gammaApiUrl: z.string().url().default('https://gamma-api.polymarket.com'),
+  clobApiUrl: z.string().url().default('https://clob.polymarket.com'),
+  dataApiUrl: z.string().url().default('https://data-api.polymarket.com'),
+
+  // Batch sizes
+  marketsBatchSize: z.coerce.number().int().positive().default(500),
+  tradesBatchSize: z.coerce.number().int().positive().default(500),
+
+  // Logging
+  logLevel: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+
+  // Environment
+  nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
+});
+
+export type Config = z.infer<typeof ConfigSchema>;
+
+let cachedConfig: Config | null = null;
+
+/**
+ * Get validated configuration from environment variables
+ */
+export function getConfig(): Config {
+  if (cachedConfig) {
+    return cachedConfig;
+  }
+
+  const rawConfig = {
+    databaseUrl: process.env.DATABASE_URL,
+    port: process.env.PORT,
+    host: process.env.HOST,
+    marketsSyncInterval: process.env.MARKETS_SYNC_INTERVAL,
+    tradesSyncInterval: process.env.TRADES_SYNC_INTERVAL,
+    priceFlushInterval: process.env.PRICE_FLUSH_INTERVAL,
+    wsUrl: process.env.WS_URL,
+    wsReconnectInterval: process.env.WS_RECONNECT_INTERVAL,
+    wsMaxReconnectAttempts: process.env.WS_MAX_RECONNECT_ATTEMPTS,
+    gammaApiUrl: process.env.GAMMA_API_URL,
+    clobApiUrl: process.env.CLOB_API_URL,
+    dataApiUrl: process.env.DATA_API_URL,
+    marketsBatchSize: process.env.MARKETS_BATCH_SIZE,
+    tradesBatchSize: process.env.TRADES_BATCH_SIZE,
+    logLevel: process.env.LOG_LEVEL,
+    nodeEnv: process.env.NODE_ENV,
+  };
+
+  // Remove undefined values so defaults are applied
+  const cleanConfig = Object.fromEntries(
+    Object.entries(rawConfig).filter(([, v]) => v !== undefined)
+  );
+
+  const result = ConfigSchema.safeParse(cleanConfig);
+
+  if (!result.success) {
+    console.error('Invalid configuration:', result.error.format());
+    throw new Error('Invalid configuration');
+  }
+
+  cachedConfig = result.data;
+  return cachedConfig;
+}
+
+/**
+ * Reset cached config (useful for testing)
+ */
+export function resetConfig(): void {
+  cachedConfig = null;
+}
