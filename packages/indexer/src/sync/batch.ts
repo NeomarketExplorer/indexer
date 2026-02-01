@@ -166,6 +166,9 @@ export class BatchSyncManager {
       // Link markets to events (works for markets that already exist)
       await this.applyEventMarketLinks();
 
+      // Deactivate events whose end date has passed
+      await this.auditExpiredEvents();
+
       await this.updateSyncState('events', 'idle', { count: totalEvents, durationMs: Date.now() - startTime });
 
       // Targeted invalidation (#11)
@@ -235,6 +238,9 @@ export class BatchSyncManager {
 
       await fetchByFilter({ closed: false });
       await fetchByFilter({ closed: true });
+
+      // Deactivate markets whose end date has passed
+      await this.auditExpiredMarkets();
 
       await this.updateSyncState('markets', 'idle', { count: totalMarkets, durationMs: Date.now() - startTime });
 
@@ -567,6 +573,53 @@ export class BatchSyncManager {
       SET search_vector = to_tsvector('english', question || ' ' || coalesce(description, ''))
       WHERE id = ANY(${ids})
     `);
+  }
+
+  // ─── Post-sync expiration audit ──────────────────────────
+
+  /**
+   * Mark markets as inactive when their end date has passed.
+   * Only sets `active = false` — does NOT set `closed = true` so we
+   * preserve the distinction between "expired" and "officially resolved".
+   */
+  private async auditExpiredMarkets(): Promise<void> {
+    const db = getDb();
+    const result = await db.execute(sql`
+      UPDATE markets
+      SET active = false, updated_at = NOW()
+      WHERE active = true
+        AND end_date_iso IS NOT NULL
+        AND end_date_iso::timestamptz < NOW()
+    `);
+
+    const count = Number(result.rowCount ?? 0);
+    if (count > 0) {
+      this.logger.info({ count }, 'Marked expired markets as inactive');
+      await invalidateCache('neomarket:cache:GET:/markets*');
+      await invalidateCache('neomarket:cache:GET:/stats*');
+    }
+  }
+
+  /**
+   * Mark events as inactive when their end date has passed.
+   * Only sets `active = false` — does NOT set `closed = true`.
+   */
+  private async auditExpiredEvents(): Promise<void> {
+    const db = getDb();
+    const result = await db.execute(sql`
+      UPDATE events
+      SET active = false, updated_at = NOW()
+      WHERE active = true
+        AND end_date IS NOT NULL
+        AND end_date < NOW()
+    `);
+
+    const count = Number(result.rowCount ?? 0);
+    if (count > 0) {
+      this.logger.info({ count }, 'Marked expired events as inactive');
+      await invalidateCache('neomarket:cache:GET:/events*');
+      await invalidateCache('neomarket:cache:GET:/stats*');
+    }
   }
 
   /**
