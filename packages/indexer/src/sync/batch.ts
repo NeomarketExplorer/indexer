@@ -454,10 +454,11 @@ export class BatchSyncManager {
 
     // Compute search vectors (#10)
     const ids = gammaEvents.map(e => e.id);
+    const idList = sql.join(ids.map(id => sql`${id}`), sql`,`);
     await db.execute(sql`
       UPDATE events
       SET search_vector = to_tsvector('english', title || ' ' || coalesce(description, ''))
-      WHERE id = ANY(${ids})
+      WHERE id IN (${idList})
     `);
   }
 
@@ -568,10 +569,11 @@ export class BatchSyncManager {
 
     // Compute search vectors (#10)
     const ids = gammaMarkets.map(m => m.id);
+    const idList = sql.join(ids.map(id => sql`${id}`), sql`,`);
     await db.execute(sql`
       UPDATE markets
       SET search_vector = to_tsvector('english', question || ' ' || coalesce(description, ''))
-      WHERE id = ANY(${ids})
+      WHERE id IN (${idList})
     `);
   }
 
