@@ -36,6 +36,7 @@ export class RealtimeSyncManager {
   private ws: WebSocket | null = null;
   private isConnected = false;
   private isConnecting = false;
+  private isFlushingPrices = false;
   private shouldReconnect = true;
   private reconnectAttempts = 0;
   private priceBuffer: Map<string, PriceUpdate> = new Map();
@@ -231,9 +232,16 @@ export class RealtimeSyncManager {
    * (#6) Takes a snapshot first; clears only on success so failures retain data.
    */
   private async flushPrices(): Promise<void> {
+    if (this.isFlushingPrices) {
+      this.logger.debug('Price flush already in progress, skipping');
+      return;
+    }
+
     if (this.priceBuffer.size === 0) {
       return;
     }
+
+    this.isFlushingPrices = true;
 
     // Soft cap warning
     if (this.priceBuffer.size > BUFFER_SIZE_WARNING) {
@@ -312,6 +320,8 @@ export class RealtimeSyncManager {
     } catch (error) {
       this.logger.error({ error }, 'Failed to flush prices, will retry next interval');
       // Buffer is intentionally preserved for retry
+    } finally {
+      this.isFlushingPrices = false;
     }
   }
 

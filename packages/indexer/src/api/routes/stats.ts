@@ -19,7 +19,7 @@ statsRouter.get('/', cached({ ttl: 120 }), async (c) => {
   const marketStats = await db
     .select({
       total: sql<number>`count(*)`,
-      active: sql<number>`count(*) filter (where closed = false)`,
+      active: sql<number>`count(*) filter (where active = true and closed = false)`,
       closed: sql<number>`count(*) filter (where closed = true)`,
       totalVolume: sql<number>`coalesce(sum(volume), 0)`,
       totalVolume24hr: sql<number>`coalesce(sum(volume_24hr), 0)`,
@@ -31,7 +31,7 @@ statsRouter.get('/', cached({ ttl: 120 }), async (c) => {
   const eventStats = await db
     .select({
       total: sql<number>`count(*)`,
-      active: sql<number>`count(*) filter (where closed = false)`,
+      active: sql<number>`count(*) filter (where active = true and closed = false)`,
       closed: sql<number>`count(*) filter (where closed = true)`,
     })
     .from(events);

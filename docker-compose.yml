@@ -41,8 +41,6 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-polymarket}
       REDIS_URL: redis://redis:6379
       CORS_ORIGINS: https://neomarket.bet,https://www.neomarket.bet,http://localhost:3000,http://localhost:3001
-      SYNC_ENABLED: ${SYNC_ENABLED:-true}
-      SYNC_INTERVAL_MS: ${SYNC_INTERVAL_MS:-300000}
     ports:
       - '3005:3005'
     healthcheck:

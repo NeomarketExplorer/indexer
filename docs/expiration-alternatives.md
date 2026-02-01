@@ -99,7 +99,30 @@ WHERE active = true
   AND end_date_iso::timestamptz < NOW()
 ```
 
-### 3. Periodic syncs skip closed items
+### 3. Cascading event audit
+
+Some events have no `end_date`, so they never expire via the event audit. To
+avoid showing events whose markets are all inactive, we run a second audit that
+deactivates any open event where zero linked markets remain active:
+
+```sql
+UPDATE events
+SET active = false, updated_at = NOW()
+WHERE active = true
+  AND closed = false
+  AND id IN (
+    SELECT e.id FROM events e
+    JOIN markets m ON m.event_id = e.id
+    WHERE e.active = true AND e.closed = false
+    GROUP BY e.id
+    HAVING COUNT(*) FILTER (WHERE m.active = true) = 0
+  )
+```
+
+Events with no linked markets are left untouched, since there is no data to
+infer their state.
+
+### 4. Periodic syncs skip closed items
 
 Closed/resolved items are immutable — Polymarket doesn't change them after
 resolution. Periodic syncs (every 5 min) only fetch `closed: false` items

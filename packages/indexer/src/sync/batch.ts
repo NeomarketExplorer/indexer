@@ -1,6 +1,6 @@
 /**
  * Batch sync manager - periodic polling of APIs
- * Optimized for high volume: ~26,000 markets, ~7,000 events
+ * Optimized for high volume: ~26,000 open markets, ~7,000 open events
  *
  * Fixes applied:
  * - #1  Batched multi-row upserts instead of per-row INSERTs
@@ -23,9 +23,9 @@ import { invalidateCache } from '../api/middleware/cache';
 
 export class BatchSyncManager {
   private logger = createChildLogger({ module: 'batch-sync' });
-  private gammaClient = createGammaClient();
-  private clobClient = createClobClient();
   private config = getConfig();
+  private gammaClient = createGammaClient({ baseUrl: this.config.gammaApiUrl });
+  private clobClient = createClobClient({ baseUrl: this.config.clobApiUrl });
   private intervals: NodeJS.Timeout[] = [];
 
   // Per-entity sync locks (#2)
@@ -608,6 +608,7 @@ export class BatchSyncManager {
   private async runExpirationAudit(): Promise<void> {
     try {
       await this.auditExpiredMarkets();
+      await this.auditEventsWithNoActiveMarkets();
       await this.auditExpiredEvents();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -658,6 +659,35 @@ export class BatchSyncManager {
 
     const count = result.rows?.length ?? result.length ?? 0;
     this.logger.info({ count }, 'Expired events audit completed');
+    if (count > 0) {
+      await invalidateCache('neomarket:cache:GET:/events*');
+      await invalidateCache('neomarket:cache:GET:/stats*');
+    }
+  }
+
+  /**
+   * Deactivate open events when none of their linked markets remain active.
+   * Does not touch events with no linked markets.
+   */
+  private async auditEventsWithNoActiveMarkets(): Promise<void> {
+    const db = getDb();
+    const result = await db.execute(sql`
+      UPDATE events
+      SET active = false, updated_at = NOW()
+      WHERE active = true
+        AND closed = false
+        AND id IN (
+          SELECT e.id FROM events e
+          JOIN markets m ON m.event_id = e.id
+          WHERE e.active = true AND e.closed = false
+          GROUP BY e.id
+          HAVING COUNT(*) FILTER (WHERE m.active = true) = 0
+        )
+      RETURNING id
+    `);
+
+    const count = result.rows?.length ?? result.length ?? 0;
+    this.logger.info({ count }, 'Events with no active markets audit completed');
     if (count > 0) {
       await invalidateCache('neomarket:cache:GET:/events*');
       await invalidateCache('neomarket:cache:GET:/stats*');

@@ -6,10 +6,12 @@ import { eq, sql, desc } from 'drizzle-orm';
 import { createClobClient, type PriceHistoryPoint } from '@app/api/clob';
 import { getDb, markets, priceHistory } from '../db';
 import { createChildLogger } from '../lib/logger';
+import { getConfig } from '../lib/config';
 
 export class BackfillManager {
   private logger = createChildLogger({ module: 'backfill' });
-  private clobClient = createClobClient();
+  private config = getConfig();
+  private clobClient = createClobClient({ baseUrl: this.config.clobApiUrl });
 
   /**
    * Backfill price history for a specific market
@@ -66,13 +68,32 @@ export class BackfillManager {
       const batchSize = 100;
       for (let i = 0; i < history.length; i += batchSize) {
         const batch = history.slice(i, i + batchSize);
-        const values = batch.map((point: PriceHistoryPoint) => ({
-          marketId: market.id,
-          tokenId: tokenIds[0], // Primary outcome token
-          timestamp: new Date(point.t * 1000), // Convert unix timestamp
-          price: point.p,
-          source: 'clob' as const,
-        }));
+        const values = batch.flatMap((point: PriceHistoryPoint) => {
+          const timestamp = new Date(point.t * 1000);
+          const base = {
+            marketId: market.id,
+            timestamp,
+            source: 'clob' as const,
+          };
+
+          if (tokenIds.length === 2) {
+            const yesPrice = point.p;
+            const noPrice = 1 - point.p;
+            return [
+              { ...base, tokenId: tokenIds[0], price: yesPrice },
+              { ...base, tokenId: tokenIds[1], price: noPrice },
+            ];
+          }
+
+          if (tokenIds.length > 2) {
+            this.logger.warn(
+              { marketId, tokenCount: tokenIds.length },
+              'Multi-outcome market history only recorded for primary token'
+            );
+          }
+
+          return [{ ...base, tokenId: tokenIds[0], price: point.p }];
+        });
 
         // Upsert to avoid duplicates
         await db.insert(priceHistory)

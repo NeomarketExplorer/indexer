@@ -4,7 +4,7 @@ A high-performance Polymarket indexer that provides real-time market data with s
 
 ## Features
 
-- **Full Data Sync**: ~178K events, ~401K markets, ~7K live events
+- **Full Data Sync**: ~186K events, ~429K markets, ~7K live events, ~26K live markets
 - **Real-time Price Updates**: Sub-second price updates via WebSocket
 - **Multiple Data Sources**: Integrates Gamma API, CLOB API, Data API, and WebSocket
 - **PostgreSQL Storage**: Persistent storage with Drizzle ORM
@@ -18,7 +18,7 @@ A high-performance Polymarket indexer that provides real-time market data with s
 
 From the project root:
 ```bash
-# Start all services (db, indexer, web)
+# Start all services (db, redis, indexer)
 pnpm docker:up
 
 # View logs
@@ -186,5 +186,5 @@ The `start.sh` script automatically runs migrations before starting the server.
 ## Notes
 
 - **Batch Size**: Sync uses `FETCH_BATCH_SIZE=500` to stay under Gamma API limits
-- **Initial Sync**: First sync takes several minutes to fetch all ~178K events
+ - **Initial Sync**: First sync takes several minutes to fetch all ~186K events
 - **Memory**: Full dataset requires ~2GB RAM for comfortable operation
