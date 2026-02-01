@@ -48,16 +48,26 @@ export class BatchSyncManager {
   }
 
   /**
-   * Run initial full sync of all data (includes closed items)
+   * Run initial sync. Only fetches closed items on a fresh database —
+   * on redeploys the closed data from previous syncs is already there
+   * and never changes, so we skip the expensive closed pass.
    */
   async runInitialSync(): Promise<void> {
-    this.logger.info('Starting initial sync (expect ~26k open markets, ~7k open events + closed)');
+    const db = getDb();
+    const [{ count }] = await db.execute(sql`
+      SELECT count(*)::int AS count FROM markets WHERE closed = true LIMIT 1
+    `) as unknown as [{ count: number }];
+    const isFreshDb = count === 0;
+
+    this.logger.info({ isFreshDb }, isFreshDb
+      ? 'Fresh database — syncing all items including closed'
+      : 'Existing data found — syncing open items only (closed items preserved from previous syncs)');
 
     // Sync events first (they're parents of markets)
-    await this.syncEvents({ includeClosed: true });
+    await this.syncEvents({ includeClosed: isFreshDb });
 
     // Then sync markets
-    await this.syncMarkets({ includeClosed: true });
+    await this.syncMarkets({ includeClosed: isFreshDb });
 
     // Re-apply event→market linkages now that markets exist
     await this.applyEventMarketLinks();
