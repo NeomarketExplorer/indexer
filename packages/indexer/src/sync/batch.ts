@@ -617,8 +617,8 @@ export class BatchSyncManager {
 
   /**
    * Mark markets as inactive when their end date has passed.
-   * Only sets `active = false` — does NOT set `closed = true` so we
-   * preserve the distinction between "expired" and "officially resolved".
+   * Only targets open (not yet resolved) markets — closed markets
+   * are already resolved by Polymarket and should keep their state.
    */
   private async auditExpiredMarkets(): Promise<void> {
     const db = getDb();
@@ -626,6 +626,7 @@ export class BatchSyncManager {
       UPDATE markets
       SET active = false, updated_at = NOW()
       WHERE active = true
+        AND closed = false
         AND end_date_iso IS NOT NULL
         AND end_date_iso::timestamptz < NOW()
       RETURNING id
@@ -641,7 +642,7 @@ export class BatchSyncManager {
 
   /**
    * Mark events as inactive when their end date has passed.
-   * Only sets `active = false` — does NOT set `closed = true`.
+   * Only targets open (not yet resolved) events.
    */
   private async auditExpiredEvents(): Promise<void> {
     const db = getDb();
@@ -649,6 +650,7 @@ export class BatchSyncManager {
       UPDATE events
       SET active = false, updated_at = NOW()
       WHERE active = true
+        AND closed = false
         AND end_date IS NOT NULL
         AND end_date < NOW()
       RETURNING id
