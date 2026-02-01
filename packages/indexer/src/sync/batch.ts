@@ -48,16 +48,16 @@ export class BatchSyncManager {
   }
 
   /**
-   * Run initial full sync of all data
+   * Run initial full sync of all data (includes closed items)
    */
   async runInitialSync(): Promise<void> {
-    this.logger.info('Starting initial sync (expect ~26k markets, ~7k events)');
+    this.logger.info('Starting initial sync (expect ~26k open markets, ~7k open events + closed)');
 
     // Sync events first (they're parents of markets)
-    await this.syncEvents();
+    await this.syncEvents({ includeClosed: true });
 
     // Then sync markets
-    await this.syncMarkets();
+    await this.syncMarkets({ includeClosed: true });
 
     // Re-apply event→market linkages now that markets exist
     await this.applyEventMarketLinks();
@@ -94,6 +94,14 @@ export class BatchSyncManager {
     );
     this.intervals.push(tradesInterval);
 
+    // Expiration audit every 60s — decoupled from sync so expired
+    // items are caught even while a long sync is still running
+    const auditInterval = setInterval(
+      () => this.runExpirationAudit(),
+      60_000
+    );
+    this.intervals.push(auditInterval);
+
     this.logger.info({
       marketsSyncInterval: this.config.marketsSyncInterval,
       tradesSyncInterval: this.config.tradesSyncInterval,
@@ -111,7 +119,7 @@ export class BatchSyncManager {
 
   // ─── Events ──────────────────────────────────────────────
 
-  async syncEvents(): Promise<void> {
+  async syncEvents({ includeClosed = false } = {}): Promise<void> {
     if (this.isSyncingEvents) {
       this.logger.warn('Events sync already in progress, skipping');
       return;
@@ -127,7 +135,7 @@ export class BatchSyncManager {
 
     try {
       await this.updateSyncState('events', 'syncing');
-      this.logger.info('Syncing events from Gamma API');
+      this.logger.info({ includeClosed }, 'Syncing events from Gamma API');
 
       let totalEvents = 0;
 
@@ -161,7 +169,9 @@ export class BatchSyncManager {
       };
 
       await fetchByFilter({ closed: false });
-      await fetchByFilter({ closed: true });
+      if (includeClosed) {
+        await fetchByFilter({ closed: true });
+      }
 
       // Link markets to events (works for markets that already exist)
       await this.applyEventMarketLinks();
@@ -189,7 +199,7 @@ export class BatchSyncManager {
 
   // ─── Markets ─────────────────────────────────────────────
 
-  async syncMarkets(): Promise<void> {
+  async syncMarkets({ includeClosed = false } = {}): Promise<void> {
     if (this.isSyncingMarkets) {
       this.logger.warn('Markets sync already in progress, skipping');
       return;
@@ -204,7 +214,7 @@ export class BatchSyncManager {
 
     try {
       await this.updateSyncState('markets', 'syncing');
-      this.logger.info('Syncing markets from Gamma API');
+      this.logger.info({ includeClosed }, 'Syncing markets from Gamma API');
 
       let totalMarkets = 0;
 
@@ -237,7 +247,9 @@ export class BatchSyncManager {
       };
 
       await fetchByFilter({ closed: false });
-      await fetchByFilter({ closed: true });
+      if (includeClosed) {
+        await fetchByFilter({ closed: true });
+      }
 
       // Deactivate markets whose end date has passed
       await this.auditExpiredMarkets();
@@ -577,7 +589,21 @@ export class BatchSyncManager {
     `);
   }
 
-  // ─── Post-sync expiration audit ──────────────────────────
+  // ─── Expiration audit ────────────────────────────────────
+
+  /**
+   * Run both market and event expiration audits.
+   * Called on its own 60s timer and also after each sync completes.
+   */
+  private async runExpirationAudit(): Promise<void> {
+    try {
+      await this.auditExpiredMarkets();
+      await this.auditExpiredEvents();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error({ error: errorMessage }, 'Expiration audit failed');
+    }
+  }
 
   /**
    * Mark markets as inactive when their end date has passed.
