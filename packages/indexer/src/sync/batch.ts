@@ -592,11 +592,12 @@ export class BatchSyncManager {
       WHERE active = true
         AND end_date_iso IS NOT NULL
         AND end_date_iso::timestamptz < NOW()
+      RETURNING id
     `);
 
-    const count = Number(result.rowCount ?? 0);
+    const count = result.rows?.length ?? result.length ?? 0;
+    this.logger.info({ count }, 'Expired markets audit completed');
     if (count > 0) {
-      this.logger.info({ count }, 'Marked expired markets as inactive');
       await invalidateCache('neomarket:cache:GET:/markets*');
       await invalidateCache('neomarket:cache:GET:/stats*');
     }
@@ -614,11 +615,12 @@ export class BatchSyncManager {
       WHERE active = true
         AND end_date IS NOT NULL
         AND end_date < NOW()
+      RETURNING id
     `);
 
-    const count = Number(result.rowCount ?? 0);
+    const count = result.rows?.length ?? result.length ?? 0;
+    this.logger.info({ count }, 'Expired events audit completed');
     if (count > 0) {
-      this.logger.info({ count }, 'Marked expired events as inactive');
       await invalidateCache('neomarket:cache:GET:/events*');
       await invalidateCache('neomarket:cache:GET:/stats*');
     }
