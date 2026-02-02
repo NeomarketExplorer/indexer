@@ -3,5 +3,5 @@ CREATE INDEX IF NOT EXISTS events_open_end_date_idx
   WHERE active = true AND closed = false AND end_date IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS markets_open_end_date_iso_idx
-  ON markets ((end_date_iso::timestamptz))
+  ON markets (end_date_iso)
   WHERE active = true AND closed = false AND end_date_iso IS NOT NULL;
