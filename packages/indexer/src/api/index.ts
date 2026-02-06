@@ -38,7 +38,11 @@ app.use('*', prettyJSON());
 app.use('*', honoLogger());
 
 // Rate limit on heavy endpoints (#12)
-const rl = rateLimit({ max: config.rateLimitMax, windowMs: config.rateLimitWindowMs });
+const rl = rateLimit({
+  max: config.rateLimitMax,
+  burst: config.rateLimitBurst,
+  windowMs: config.rateLimitWindowMs,
+});
 app.use('/markets/*', rl);
 app.use('/markets', rl);
 app.use('/events/*', rl);

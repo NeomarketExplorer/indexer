@@ -168,6 +168,8 @@ Use these as action points for the next pass.
 - Stats API counts "active" using `closed = false`, which conflicts with the
   expiration audit that only flips `active`. This can misreport expired-but-not-closed
   rows as active.
+  - **Update (Feb 6, 2026):** Fixed. The stats endpoint now counts `active` using
+    the `active` flag only.
 - API base URL env vars (`GAMMA_API_URL`, `CLOB_API_URL`, `DATA_API_URL`) are read
   but not wired into client creation in the indexer, so overrides are ignored.
 - WebSocket price flush has no in-flight guard; overlapping intervals can lead to

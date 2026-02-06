@@ -41,7 +41,8 @@ const ConfigSchema = z.object({
   corsOrigins: z.string().transform(s => s.split(',').map(o => o.trim())).default('http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000'),
 
   // Rate limiting
-  rateLimitMax: z.coerce.number().int().positive().default(100),
+  rateLimitMax: z.coerce.number().int().positive().default(1000),
+  rateLimitBurst: z.coerce.number().int().positive().default(2000),
   rateLimitWindowMs: z.coerce.number().int().positive().default(60 * 1000),
 
   // Data retention
@@ -90,6 +91,7 @@ export function getConfig(): Config {
     redisUrl: process.env.REDIS_URL,
     corsOrigins: process.env.CORS_ORIGINS,
     rateLimitMax: process.env.RATE_LIMIT_MAX,
+    rateLimitBurst: process.env.RATE_LIMIT_BURST,
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS,
     priceHistoryRetentionDays: process.env.PRICE_HISTORY_RETENTION_DAYS,
     syncStaleThresholdMs: process.env.SYNC_STALE_THRESHOLD_MS,

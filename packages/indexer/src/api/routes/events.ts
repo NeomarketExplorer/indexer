@@ -81,7 +81,7 @@ eventsRouter.get('/', cached({ ttl: 60 }), async (c) => {
       .select({ count: sql<number>`count(*)` })
       .from(events)
       .where(whereClause);
-    total = countResult[0]?.count ?? 0;
+    total = Number(countResult[0]?.count ?? 0);
   }
 
   return c.json({

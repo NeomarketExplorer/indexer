@@ -63,14 +63,14 @@ describe('Stats routes', () => {
       const body = await res.json();
       const { data } = body;
 
-      // We seeded 4 markets: 2 active, 2 closed
+      // We seeded 4 markets: 3 active (including resolved), 2 closed
       expect(data.markets.total).toBe(4);
-      expect(data.markets.active).toBe(2);
+      expect(data.markets.active).toBe(3);
       expect(data.markets.closed).toBe(2);
 
-      // We seeded 3 events: 1 active, 2 closed
+      // We seeded 3 events: 2 active (including resolved), 2 closed
       expect(data.events.total).toBe(3);
-      expect(data.events.active).toBe(1);
+      expect(data.events.active).toBe(2);
       expect(data.events.closed).toBe(2);
 
       // We seeded 3 trades

@@ -8,7 +8,7 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq, desc, asc, and, sql, inArray } from 'drizzle-orm';
+import { eq, desc, asc, and, sql, inArray, gte } from 'drizzle-orm';
 import { getDb, markets, priceHistory, trades } from '../../db';
 import { cached } from '../middleware/cache';
 import { ftsWhere } from '../../db/search';
@@ -96,7 +96,7 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
       .select({ count: sql<number>`count(*)` })
       .from(markets)
       .where(whereClause);
-    total = countResult[0]?.count ?? 0;
+    total = Number(countResult[0]?.count ?? 0);
   }
 
   return c.json({
@@ -207,7 +207,7 @@ marketsRouter.get('/:id/history', cached({ ttl: 45 }), async (c) => {
   const history = await db.query.priceHistory.findMany({
     where: and(
       eq(priceHistory.marketId, id),
-      sql`${priceHistory.timestamp} >= ${startDate}`
+      gte(priceHistory.timestamp, startDate)
     ),
     orderBy: [desc(priceHistory.timestamp)],
     limit,
