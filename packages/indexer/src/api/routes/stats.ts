@@ -21,6 +21,7 @@ statsRouter.get('/', cached({ ttl: 120 }), async (c) => {
       total: sql<number>`count(*)`,
       active: sql<number>`count(*) filter (where active = true)`,
       closed: sql<number>`count(*) filter (where closed = true)`,
+      live: sql<number>`count(*) filter (where active = true and closed = false)`,
       totalVolume: sql<number>`coalesce(sum(volume), 0)`,
       totalVolume24hr: sql<number>`coalesce(sum(volume_24hr), 0)`,
       totalLiquidity: sql<number>`coalesce(sum(liquidity), 0)`,
@@ -33,6 +34,7 @@ statsRouter.get('/', cached({ ttl: 120 }), async (c) => {
       total: sql<number>`count(*)`,
       active: sql<number>`count(*) filter (where active = true)`,
       closed: sql<number>`count(*) filter (where closed = true)`,
+      live: sql<number>`count(*) filter (where active = true and closed = false)`,
     })
     .from(events);
 
@@ -66,11 +68,13 @@ statsRouter.get('/', cached({ ttl: 120 }), async (c) => {
         total: toNumber(marketStats[0]?.total),
         active: toNumber(marketStats[0]?.active),
         closed: toNumber(marketStats[0]?.closed),
+        live: toNumber(marketStats[0]?.live),
       },
       events: {
         total: toNumber(eventStats[0]?.total),
         active: toNumber(eventStats[0]?.active),
         closed: toNumber(eventStats[0]?.closed),
+        live: toNumber(eventStats[0]?.live),
       },
       trades: {
         total: toNumber(tradeStats[0]?.total),
