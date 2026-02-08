@@ -673,20 +673,52 @@ export class BatchSyncManager {
     try {
       await this.updateSyncState('clob_audit', 'syncing');
 
-      const candidates = await db.query.markets.findMany({
-        where: and(
-          eq(markets.active, true),
-          eq(markets.closed, false),
-          eq(markets.archived, false),
-        ),
-        orderBy: [desc(markets.volume24hr)],
-        limit: this.config.clobAuditBatchSize,
-        columns: { id: true, eventId: true, conditionId: true, volume24hr: true },
+      // Cursor-based sweep: iterate deterministically through all open markets
+      // over multiple runs, rather than repeatedly sampling only high-volume markets.
+      const prev = await db.query.syncState.findFirst({
+        where: eq(syncState.entity, 'clob_audit'),
+        columns: { metadata: true },
+      });
+      const prevCursor = (prev?.metadata as Record<string, unknown> | null | undefined)?.cursorConditionId;
+      const cursorConditionId = typeof prevCursor === 'string' ? prevCursor : '';
+
+      const baseWhere = and(
+        eq(markets.active, true),
+        eq(markets.closed, false),
+        eq(markets.archived, false),
+        sql`length(${markets.conditionId}) > 0`,
+      );
+
+      const batchSize = this.config.clobAuditBatchSize;
+
+      let wrapped = false;
+      let sweep = await db.query.markets.findMany({
+        where: and(baseWhere, sql`${markets.conditionId} > ${cursorConditionId}`),
+        orderBy: [sql`${markets.conditionId} ASC`],
+        limit: batchSize,
+        columns: { id: true, eventId: true, conditionId: true },
       });
 
-      const toCheck = candidates.filter(m => (m.conditionId ?? '').length > 0);
+      if (sweep.length === 0 && cursorConditionId !== '') {
+        // Wrap around to the start of the ordering.
+        wrapped = true;
+        sweep = await db.query.markets.findMany({
+          where: baseWhere,
+          orderBy: [sql`${markets.conditionId} ASC`],
+          limit: batchSize,
+          columns: { id: true, eventId: true, conditionId: true },
+        });
+      }
+
+      const toCheck = sweep;
       if (toCheck.length === 0) {
-        await this.updateSyncState('clob_audit', 'idle', { checked: 0, closed: 0, durationMs: Date.now() - startTime });
+        await this.updateSyncState('clob_audit', 'idle', {
+          checked: 0,
+          closed: 0,
+          durationMs: Date.now() - startTime,
+          cursorConditionId,
+          wrapped,
+        });
         return;
       }
 
@@ -729,36 +761,6 @@ export class BatchSyncManager {
       // Pass 1: check the top-N markets.
       await checkMarkets(toCheck);
 
-      // Pass 1b: also check open markets for events that already have some
-      // closed markets in our DB. This catches cases where an event is fully
-      // closed on CLOB but only a few low-volume markets remain marked open
-      // in our DB.
-      const mixedEventOpen = await db.query.markets.findMany({
-        where: and(
-          eq(markets.active, true),
-          eq(markets.closed, false),
-          eq(markets.archived, false),
-          sql`${markets.eventId} IN (
-            SELECT event_id FROM markets
-            WHERE event_id IS NOT NULL
-            GROUP BY event_id
-            HAVING COUNT(*) FILTER (WHERE closed = true) > 0
-               AND COUNT(*) FILTER (WHERE active = true AND closed = false AND archived = false) > 0
-          )`,
-        ),
-        orderBy: [desc(markets.volume24hr)],
-        limit: this.config.clobAuditBatchSize,
-        columns: { id: true, eventId: true, conditionId: true, volume24hr: true },
-      });
-
-      const mixedToCheck = mixedEventOpen
-        .filter(m => (m.conditionId ?? '').length > 0)
-        .filter(m => !checkedMarketIds.has(m.id));
-      if (mixedToCheck.length > 0) {
-        for (const m of mixedToCheck) checkedMarketIds.add(m.id);
-        await checkMarkets(mixedToCheck);
-      }
-
       // Pass 2: if any market in an event was found closed on CLOB, check all
       // remaining "open" markets for those events as well. This quickly fixes
       // events where most markets are closed but a few low-volume ones linger
@@ -766,7 +768,11 @@ export class BatchSyncManager {
       if (touchedEventIds.size > 0) {
         const eIds = Array.from(touchedEventIds);
         const eList = sql.join(eIds.map(id => sql`${id}`), sql`,`);
-        const more = await db.query.markets.findMany({
+        const remainingBudget = Math.max(0, batchSize - checkedMarketIds.size);
+        if (remainingBudget === 0) {
+          // Leave the rest for the next sweep run.
+        } else {
+          const more = await db.query.markets.findMany({
           where: and(
             sql`${markets.eventId} IN (${eList})`,
             eq(markets.active, true),
@@ -774,16 +780,17 @@ export class BatchSyncManager {
             eq(markets.archived, false),
           ),
           columns: { id: true, eventId: true, conditionId: true, volume24hr: true },
-          limit: this.config.clobAuditBatchSize, // cap worst-case fanout
-        });
+          limit: remainingBudget, // cap fanout to remaining budget
+          });
 
-        const extraToCheck = more
+          const extraToCheck = more
           .filter(m => (m.conditionId ?? '').length > 0)
           .filter(m => !checkedMarketIds.has(m.id));
 
-        if (extraToCheck.length > 0) {
-          for (const m of extraToCheck) checkedMarketIds.add(m.id);
-          await checkMarkets(extraToCheck);
+          if (extraToCheck.length > 0) {
+            for (const m of extraToCheck) checkedMarketIds.add(m.id);
+            await checkMarkets(extraToCheck);
+          }
         }
       }
 
@@ -825,16 +832,20 @@ export class BatchSyncManager {
         await invalidateCache('neomarket:cache:GET:/stats*');
       }
 
+      const nextCursorConditionId = toCheck[toCheck.length - 1]?.conditionId ?? cursorConditionId;
       await this.updateSyncState('clob_audit', 'idle', {
-        checked: toCheck.length,
+        checked: checkedMarketIds.size,
         closed: closedCount,
         durationMs: Date.now() - startTime,
+        cursorConditionId: nextCursorConditionId,
+        wrapped,
       });
 
       this.logger.info({
-        checked: toCheck.length,
+        checked: checkedMarketIds.size,
         closed: closedCount,
         durationMs: Date.now() - startTime,
+        wrapped,
       }, 'CLOB tradability audit completed');
 
     } catch (error) {
