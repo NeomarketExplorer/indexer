@@ -306,11 +306,13 @@ export class BatchSyncManager {
       await this.updateSyncState('trades', 'syncing');
       const db = getDb();
 
-      // Top open+active markets by 24h volume
+      // Open+active markets (token_id -> market_id mapping for filtering global trades feed)
       const activeMarkets = await db.query.markets.findMany({
-        where: and(eq(markets.active, true), eq(markets.closed, false)),
-        orderBy: [desc(markets.volume24hr)],
-        limit: this.config.tradesSyncMarketLimit,
+        where: and(
+          eq(markets.active, true),
+          eq(markets.closed, false),
+          eq(markets.archived, false),
+        ),
         columns: { id: true, outcomeTokenIds: true },
       });
 
