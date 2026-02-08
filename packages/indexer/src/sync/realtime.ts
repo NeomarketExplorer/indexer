@@ -285,13 +285,17 @@ export class RealtimeSyncManager {
           }
 
           // Insert price history
-          await db.insert(priceHistory).values({
-            marketId: update.marketId,
-            tokenId: update.tokenId,
-            timestamp: update.timestamp,
-            price: update.price,
-            source: 'websocket',
-          });
+          await db.insert(priceHistory)
+            .values({
+              marketId: update.marketId,
+              tokenId: update.tokenId,
+              timestamp: update.timestamp,
+              price: update.price,
+              source: 'websocket',
+            })
+            .onConflictDoNothing({
+              target: [priceHistory.marketId, priceHistory.tokenId, priceHistory.timestamp, priceHistory.source],
+            });
         }
 
         // (#7) Update outcomePrices only — do NOT overwrite lastTradePrice.

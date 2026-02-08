@@ -172,12 +172,13 @@ export const priceHistory = pgTable('price_history', {
   tokenId: text('token_id').notNull(),
   timestamp: timestamp('timestamp', { withTimezone: true }).notNull(),
   price: real('price').notNull(),
-  source: varchar('source', { length: 20 }).default('clob'), // 'clob' | 'websocket'
+  source: varchar('source', { length: 20 }).notNull().default('clob'), // 'clob' | 'websocket'
 }, (table) => [
   index('price_history_market_id_idx').on(table.marketId),
   index('price_history_token_id_idx').on(table.tokenId),
   index('price_history_timestamp_idx').on(table.timestamp),
   index('price_history_market_timestamp_idx').on(table.marketId, table.timestamp),
+  uniqueIndex('price_history_market_token_ts_source_uidx').on(table.marketId, table.tokenId, table.timestamp, table.source),
 ]);
 
 // ============================================

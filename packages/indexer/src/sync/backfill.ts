@@ -98,7 +98,9 @@ export class BackfillManager {
         // Upsert to avoid duplicates
         await db.insert(priceHistory)
           .values(values)
-          .onConflictDoNothing();
+          .onConflictDoNothing({
+            target: [priceHistory.marketId, priceHistory.tokenId, priceHistory.timestamp, priceHistory.source],
+          });
 
         totalInserted += batch.length;
       }
