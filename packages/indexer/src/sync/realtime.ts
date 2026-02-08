@@ -203,11 +203,14 @@ export class RealtimeSyncManager {
             : message.price;
 
           if (!isNaN(price)) {
+            // Some feeds send epoch seconds, others send epoch ms.
+            const rawTs = message.timestamp ?? Date.now();
+            const tsMs = rawTs < 1e12 ? rawTs * 1000 : rawTs;
             this.priceBuffer.set(tokenId, {
               tokenId,
               marketId,
               price,
-              timestamp: new Date(message.timestamp ?? Date.now()),
+              timestamp: new Date(tsMs),
             });
           }
         }
