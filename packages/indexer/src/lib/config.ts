@@ -20,7 +20,8 @@ const ConfigSchema = z.object({
   priceFlushInterval: z.coerce.number().int().positive().default(1000), // 1 second
 
   // WebSocket
-  wsUrl: z.string().url().default('wss://ws-subscriptions-clob.polymarket.com/ws'),
+  // Polymarket "market" channel (the legacy /ws endpoint now returns 404)
+  wsUrl: z.string().url().default('wss://ws-subscriptions-clob.polymarket.com/ws/market'),
   wsReconnectInterval: z.coerce.number().int().positive().default(3000),
   wsMaxReconnectAttempts: z.coerce.number().int().positive().default(10),
 

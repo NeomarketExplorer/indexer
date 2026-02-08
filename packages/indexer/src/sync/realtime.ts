@@ -21,11 +21,11 @@ interface PriceUpdate {
 }
 
 interface WebSocketMessage {
-  type?: string;
-  asset_id?: string;
-  market?: string;
-  price?: string | number;
-  timestamp?: number;
+  // Market-channel messages come in a few shapes:
+  // - Orderbook snapshots: JSON array of { asset_id, bids, asks, timestamp, ... }
+  // - Price changes: { market, price_changes: [{ asset_id, price, best_bid, best_ask, ... }, ...] }
+  // Keep this permissive; parsing happens in handleMessage().
+  [key: string]: unknown;
 }
 
 const BUFFER_SIZE_WARNING = 10000;
@@ -174,11 +174,10 @@ export class RealtimeSyncManager {
     for (let i = 0; i < tokenIds.length; i += batchSize) {
       const batch = tokenIds.slice(i, i + batchSize);
 
-      const subscription = {
-        action: 'subscribe',
-        type: 'last_trade_price',
-        assets_ids: batch,
-      };
+      // Polymarket market-channel initial subscription message.
+      // Subsequent subscriptions use operation=subscribe, but sending the initial
+      // shape is accepted at connect time and keeps the protocol simple.
+      const subscription = { type: 'market', assets_ids: batch };
 
       this.ws.send(JSON.stringify(subscription));
     }
@@ -191,29 +190,39 @@ export class RealtimeSyncManager {
    */
   private handleMessage(data: string): void {
     try {
-      const message = JSON.parse(data) as WebSocketMessage;
+      const parsed = JSON.parse(data) as WebSocketMessage | unknown[];
 
-      if (message.asset_id && message.price !== undefined) {
-        const tokenId = message.asset_id;
+      // Orderbook snapshot: array of entries, each for a tokenId.
+      // We currently ignore these (they are large); price updates come via price_changes.
+      if (Array.isArray(parsed)) {
+        return;
+      }
+
+      const message = parsed as WebSocketMessage;
+      const priceChanges = (message as { price_changes?: unknown }).price_changes;
+
+      if (!Array.isArray(priceChanges)) {
+        return;
+      }
+
+      const now = new Date();
+
+      for (const change of priceChanges as Array<Record<string, unknown>>) {
+        const tokenId = typeof change.asset_id === 'string' ? change.asset_id : null;
+        const priceRaw = change.price;
+        const price = typeof priceRaw === 'string' ? parseFloat(priceRaw) : typeof priceRaw === 'number' ? priceRaw : NaN;
+
+        if (!tokenId || isNaN(price)) continue;
+
         const marketId = this.tokenToMarket.get(tokenId);
+        if (!marketId) continue;
 
-        if (marketId) {
-          const price = typeof message.price === 'string'
-            ? parseFloat(message.price)
-            : message.price;
-
-          if (!isNaN(price)) {
-            // Some feeds send epoch seconds, others send epoch ms.
-            const rawTs = message.timestamp ?? Date.now();
-            const tsMs = rawTs < 1e12 ? rawTs * 1000 : rawTs;
-            this.priceBuffer.set(tokenId, {
-              tokenId,
-              marketId,
-              price,
-              timestamp: new Date(tsMs),
-            });
-          }
-        }
+        this.priceBuffer.set(tokenId, {
+          tokenId,
+          marketId,
+          price,
+          timestamp: now,
+        });
       }
     } catch (error) {
       this.logger.warn({ data, error }, 'Failed to parse WebSocket message');
@@ -372,6 +381,20 @@ export class RealtimeSyncManager {
    */
   async resubscribe(): Promise<void> {
     await this.loadActiveTokens();
+
+    // If connected, add tokens via operation=subscribe (market channel).
+    // If not, subscribeToTokens() will run on connect().
+    if (this.ws && this.isConnected && this.subscribedTokens.size > 0) {
+      const tokenIds = Array.from(this.subscribedTokens);
+      const batchSize = 100;
+      for (let i = 0; i < tokenIds.length; i += batchSize) {
+        const batch = tokenIds.slice(i, i + batchSize);
+        this.ws.send(JSON.stringify({ operation: 'subscribe', assets_ids: batch }));
+      }
+      this.logger.info({ tokenCount: tokenIds.length }, 'Resubscribed to market channel tokens');
+      return;
+    }
+
     this.subscribeToTokens();
   }
 

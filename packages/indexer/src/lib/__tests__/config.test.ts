@@ -126,6 +126,6 @@ describe('getConfig', () => {
     expect(config.gammaApiUrl).toBe('https://gamma-api.polymarket.com');
     expect(config.clobApiUrl).toBe('https://clob.polymarket.com');
     expect(config.dataApiUrl).toBe('https://data-api.polymarket.com');
-    expect(config.wsUrl).toBe('wss://ws-subscriptions-clob.polymarket.com/ws');
+    expect(config.wsUrl).toBe('wss://ws-subscriptions-clob.polymarket.com/ws/market');
   });
 });
