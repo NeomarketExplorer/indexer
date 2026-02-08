@@ -6,7 +6,7 @@
  */
 
 import { Hono } from 'hono';
-import { checkDbConnection, getDb, syncState } from '../../db';
+import { checkDbConnection, getDb } from '../../db';
 import { getConfig } from '../../lib/config';
 
 export const healthRouter = new Hono();

@@ -4,7 +4,7 @@
 
 import { Hono } from 'hono';
 import { sql, eq } from 'drizzle-orm';
-import { getDb, markets, events, trades, syncState } from '../../db';
+import { getDb, markets, events, trades } from '../../db';
 import { cached } from '../middleware/cache';
 
 export const statsRouter = new Hono();

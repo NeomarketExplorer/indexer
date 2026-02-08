@@ -7,7 +7,7 @@
  * - #9  Never permanently give up reconnecting
  */
 
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { getDb, markets, priceHistory, syncState } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';

@@ -19,9 +19,7 @@ import { getLogger } from '../lib/logger';
 import { getConfig } from '../lib/config';
 import { rateLimit } from './middleware/rateLimit';
 
-export type AppEnv = {
-  // Add bindings/variables here if needed
-};
+export type AppEnv = Record<string, never>;
 
 const app = new Hono<AppEnv>();
 const config = getConfig();

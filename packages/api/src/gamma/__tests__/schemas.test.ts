@@ -36,28 +36,28 @@ describe('GammaMarketSchema', () => {
   });
 
   it('requires id field', () => {
-    const { id, ...noId } = validMarket;
+    const { id: _id, ...noId } = validMarket;
     const result = GammaMarketSchema.safeParse(noId);
 
     expect(result.success).toBe(false);
   });
 
   it('requires conditionId field', () => {
-    const { conditionId, ...noCondition } = validMarket;
+    const { conditionId: _conditionId, ...noCondition } = validMarket;
     const result = GammaMarketSchema.safeParse(noCondition);
 
     expect(result.success).toBe(false);
   });
 
   it('requires question field', () => {
-    const { question, ...noQuestion } = validMarket;
+    const { question: _question, ...noQuestion } = validMarket;
     const result = GammaMarketSchema.safeParse(noQuestion);
 
     expect(result.success).toBe(false);
   });
 
   it('requires outcomes field', () => {
-    const { outcomes, ...noOutcomes } = validMarket;
+    const { outcomes: _outcomes, ...noOutcomes } = validMarket;
     const result = GammaMarketSchema.safeParse(noOutcomes);
 
     expect(result.success).toBe(false);

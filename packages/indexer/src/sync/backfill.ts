@@ -2,7 +2,7 @@
  * Historical data backfill from CLOB API
  */
 
-import { eq, sql, desc } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { createClobClient, type PriceHistoryPoint } from '@app/api/clob';
 import { getDb, markets, priceHistory } from '../db';
 import { createChildLogger } from '../lib/logger';

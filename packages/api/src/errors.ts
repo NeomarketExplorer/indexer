@@ -187,7 +187,7 @@ export class RateLimitError extends BaseAPIError {
   static fromResponse(
     url: string,
     headers: Headers,
-    body?: unknown
+    _body?: unknown
   ): RateLimitError {
     const retryAfter = headers.get('Retry-After');
     const limit = headers.get('X-RateLimit-Limit');
