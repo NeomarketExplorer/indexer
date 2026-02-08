@@ -909,7 +909,7 @@ export class BatchSyncManager {
           JOIN markets m ON m.event_id = e.id
           WHERE e.active = true AND e.closed = false
           GROUP BY e.id
-          HAVING COUNT(*) FILTER (WHERE m.active = true) = 0
+          HAVING COUNT(*) FILTER (WHERE m.active = true AND m.closed = false AND m.archived = false) = 0
         )
       RETURNING id
     `);
