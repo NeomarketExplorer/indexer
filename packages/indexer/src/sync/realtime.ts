@@ -7,7 +7,7 @@
  * - #9  Never permanently give up reconnecting
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getDb, markets, priceHistory, syncState } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
@@ -84,7 +84,13 @@ export class RealtimeSyncManager {
     const db = getDb();
 
     const activeMarkets = await db.query.markets.findMany({
-      where: eq(markets.active, true),
+      // Only subscribe to truly-live markets; "active=true" alone is too broad
+      // (Gamma can leave active=true for closed/archived items).
+      where: and(
+        eq(markets.active, true),
+        eq(markets.closed, false),
+        eq(markets.archived, false),
+      ),
       columns: {
         id: true,
         outcomeTokenIds: true,
