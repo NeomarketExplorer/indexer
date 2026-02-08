@@ -13,7 +13,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { eq, desc, sql } from 'drizzle-orm';
+import { and, eq, desc, sql } from 'drizzle-orm';
 import { createGammaClient, type GammaMarket, type GammaEvent } from '@app/api/gamma';
 import { createClobClient } from '@app/api/clob';
 import { getDb, markets, events, syncState, type NewMarket, type NewEvent } from '../db';
@@ -306,9 +306,9 @@ export class BatchSyncManager {
       await this.updateSyncState('trades', 'syncing');
       const db = getDb();
 
-      // Top active markets by 24h volume
+      // Top open+active markets by 24h volume
       const activeMarkets = await db.query.markets.findMany({
-        where: eq(markets.active, true),
+        where: and(eq(markets.active, true), eq(markets.closed, false)),
         orderBy: [desc(markets.volume24hr)],
         limit: this.config.tradesSyncMarketLimit,
         columns: { id: true, outcomeTokenIds: true },
