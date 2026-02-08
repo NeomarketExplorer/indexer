@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { and, eq, desc, sql } from 'drizzle-orm';
 import { createGammaClient, type GammaMarket, type GammaEvent } from '@app/api/gamma';
 import { createDataClient } from '@app/api/data';
-import { getDb, markets, events, syncState, type NewMarket, type NewEvent } from '../db';
+import { getDb, markets, events, trades, syncState, type NewMarket, type NewEvent } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
 import { invalidateCache } from '../api/middleware/cache';
@@ -328,6 +328,7 @@ export class BatchSyncManager {
 
       let relevantTrades = 0;
       let insertedTrades = 0;
+      const rowsToInsert: Array<typeof trades.$inferInsert> = [];
 
       for (const trade of feed) {
         const marketId = tokenToMarket.get(trade.asset);
@@ -338,35 +339,36 @@ export class BatchSyncManager {
         const ts = new Date(trade.timestamp * 1000);
         const tradeId = createHash('sha256')
           .update([
-            trade.asset,
-            trade.side,
-            trade.price,
-            trade.size,
-            trade.timestamp,
-            trade.transactionHash ?? '',
-            trade.proxyWallet ?? '',
+            String(trade.asset),
+            String(trade.side),
+            String(trade.price),
+            String(trade.size),
+            String(trade.timestamp),
+            String(trade.transactionHash ?? ''),
+            String(trade.proxyWallet ?? ''),
           ].join('|'))
           .digest('hex');
 
-        const rows = await db.execute(sql`
-          INSERT INTO trades (id, market_id, token_id, side, price, size, timestamp, taker_order_id, transaction_hash, fee_rate_bps)
-          VALUES (
-            ${tradeId},
-            ${marketId},
-            ${trade.asset},
-            ${trade.side},
-            ${trade.price},
-            ${trade.size},
-            ${ts},
-            ${null},
-            ${trade.transactionHash ?? null},
-            ${null}
-          )
-          ON CONFLICT (id) DO NOTHING
-          RETURNING id
-        `) as unknown as Array<{ id: string }>;
+        rowsToInsert.push({
+          id: tradeId,
+          marketId,
+          tokenId: trade.asset,
+          side: trade.side,
+          price: trade.price,
+          size: trade.size,
+          timestamp: ts,
+          takerOrderId: null,
+          transactionHash: trade.transactionHash ?? null,
+          feeRateBps: null,
+        });
+      }
 
-        insertedTrades += rows.length;
+      if (rowsToInsert.length > 0) {
+        const inserted = await db.insert(trades)
+          .values(rowsToInsert)
+          .onConflictDoNothing()
+          .returning({ id: trades.id });
+        insertedTrades = inserted.length;
       }
 
       await this.updateSyncState('trades', 'idle', {
@@ -387,7 +389,8 @@ export class BatchSyncManager {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.error({ error: errorMessage }, 'Trades sync failed');
+      // Log the full error (incl stack) for prod debugging.
+      this.logger.error({ error }, 'Trades sync failed');
       await this.updateSyncState('trades', 'error', null, errorMessage);
     } finally {
       this.isSyncingTrades = false;
