@@ -95,13 +95,6 @@ PRICE_FLUSH_INTERVAL=1000     # 1 second
 
 # Logging
 LOG_LEVEL=info
-
-# Polymarket CLOB API auth (L2) — required for endpoints like /trades
-# NOTE: Do NOT put these in a browser/frontend environment.
-POLYMARKET_API_KEY=
-POLYMARKET_API_SECRET=
-POLYMARKET_PASSPHRASE=
-POLYMARKET_ADDRESS=0x0000000000000000000000000000000000000000
 ```
 
 ## Architecture

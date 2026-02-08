@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import { and, eq, desc, sql } from 'drizzle-orm';
 import { createGammaClient, type GammaMarket, type GammaEvent } from '@app/api/gamma';
-import { createClobClient, createPolymarketL2Auth } from '@app/api/clob';
+import { createDataClient } from '@app/api/data';
 import { getDb, markets, events, syncState, type NewMarket, type NewEvent } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
@@ -25,8 +25,7 @@ export class BatchSyncManager {
   private logger = createChildLogger({ module: 'batch-sync' });
   private config = getConfig();
   private gammaClient = createGammaClient({ baseUrl: this.config.gammaApiUrl });
-  private clobAuth = this.buildClobAuth();
-  private clobClient = createClobClient({ baseUrl: this.config.clobApiUrl, auth: this.clobAuth });
+  private dataClient = createDataClient({ baseUrl: this.config.dataApiUrl });
   private intervals: NodeJS.Timeout[] = [];
 
   // Per-entity sync locks (#2)
@@ -37,8 +36,6 @@ export class BatchSyncManager {
   private lastSyncAt: Date | null = null;
   private syncError: string | null = null;
   private syncProgress = { markets: 0, events: 0, trades: 0 };
-  private warnedTradesDisabled = false;
-  private tradesAuthFailed = false;
 
   // Cached event→market linkages from last events sync (#17)
   private eventMarketPairs: Array<{ marketId: string; eventId: string }> = [];
@@ -301,34 +298,6 @@ export class BatchSyncManager {
       return;
     }
 
-    if (!this.hasTradesAuth()) {
-      if (!this.warnedTradesDisabled) {
-        this.warnedTradesDisabled = true;
-        this.logger.warn(
-          {
-            missing: [
-              !this.config.polymarketApiKey ? 'POLYMARKET_API_KEY' : null,
-              !this.config.polymarketApiSecret ? 'POLYMARKET_API_SECRET' : null,
-              !this.config.polymarketPassphrase ? 'POLYMARKET_PASSPHRASE' : null,
-              !this.config.polymarketAddress ? 'POLYMARKET_ADDRESS' : null,
-            ].filter(Boolean),
-          },
-          'Trades sync disabled (missing Polymarket CLOB auth env vars)'
-        );
-      }
-      await this.updateSyncState('trades', 'idle', {
-        disabled: true,
-        reason: 'Missing POLYMARKET_* CLOB auth env vars',
-      });
-      return;
-    }
-
-    // If we already established that creds are unauthorized, don't keep hammering the API.
-    if (this.tradesAuthFailed) {
-      await this.updateSyncState('trades', 'error', { disabled: true }, 'Unauthorized/Invalid api key');
-      return;
-    }
-
     this.isSyncingTrades = true;
     this.syncProgress.trades = 0;
     const startTime = Date.now();
@@ -345,107 +314,83 @@ export class BatchSyncManager {
         columns: { id: true, outcomeTokenIds: true },
       });
 
-      let totalTrades = 0;
-      let synced = 0;
-
+      const tokenToMarket = new Map<string, string>();
       for (const market of activeMarkets) {
         const tokenIds = market.outcomeTokenIds as string[];
         for (const tokenId of tokenIds) {
-          const result = await this.syncTrades(tokenId, market.id);
-          totalTrades += result.count;
-          // Rate limit between API calls
-          await new Promise(resolve => setTimeout(resolve, 100));
+          if (tokenId) tokenToMarket.set(tokenId, market.id);
         }
-        synced++;
-        this.syncProgress.trades = synced;
+      }
+
+      // Fetch the global public trades feed once, then filter down to
+      // the tokens we care about. This avoids CLOB auth + avoids 1 request per token.
+      const feed = await this.dataClient.getPublicTrades(this.config.tradesBatchSize);
+
+      let relevantTrades = 0;
+      let insertedTrades = 0;
+
+      for (const trade of feed) {
+        const marketId = tokenToMarket.get(trade.asset);
+        if (!marketId) continue;
+        relevantTrades++;
+        this.syncProgress.trades = relevantTrades;
+
+        const ts = new Date(trade.timestamp * 1000);
+        const tradeId = createHash('sha256')
+          .update([
+            trade.asset,
+            trade.side,
+            trade.price,
+            trade.size,
+            trade.timestamp,
+            trade.transactionHash ?? '',
+            trade.proxyWallet ?? '',
+          ].join('|'))
+          .digest('hex');
+
+        const rows = await db.execute(sql`
+          INSERT INTO trades (id, market_id, token_id, side, price, size, timestamp, taker_order_id, transaction_hash, fee_rate_bps)
+          VALUES (
+            ${tradeId},
+            ${marketId},
+            ${trade.asset},
+            ${trade.side},
+            ${trade.price},
+            ${trade.size},
+            ${ts},
+            ${null},
+            ${trade.transactionHash ?? null},
+            ${null}
+          )
+          ON CONFLICT (id) DO NOTHING
+          RETURNING id
+        `) as unknown as Array<{ id: string }>;
+
+        insertedTrades += rows.length;
       }
 
       await this.updateSyncState('trades', 'idle', {
-        count: totalTrades,
-        marketsProcessed: activeMarkets.length,
+        count: insertedTrades,
+        feedCount: feed.length,
+        relevantCount: relevantTrades,
+        marketsTracked: activeMarkets.length,
         durationMs: Date.now() - startTime,
       });
 
       this.logger.info({
-        totalTrades,
-        marketsProcessed: activeMarkets.length,
+        insertedTrades,
+        relevantTrades,
+        feedCount: feed.length,
+        marketsTracked: activeMarkets.length,
         durationMs: Date.now() - startTime,
       }, 'Trades sync completed');
 
     } catch (error) {
-      const status = typeof (error as { status?: unknown } | null)?.status === 'number'
-        ? (error as { status: number }).status
-        : null;
-
-      if (status === 401) {
-        this.tradesAuthFailed = true;
-        this.logger.error('Trades sync unauthorized (invalid Polymarket API key/secret/passphrase/address combination)');
-        await this.updateSyncState('trades', 'error', { disabled: true }, 'Unauthorized/Invalid api key');
-        return;
-      }
-
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error({ error: errorMessage }, 'Trades sync failed');
       await this.updateSyncState('trades', 'error', null, errorMessage);
     } finally {
       this.isSyncingTrades = false;
-    }
-  }
-
-  /**
-   * Sync trades from CLOB API for a specific market token
-   */
-  async syncTrades(tokenId: string, marketId: string): Promise<{ success: boolean; count: number }> {
-    const db = getDb();
-
-    try {
-      const trades = await this.clobClient.getTrades(tokenId, this.config.tradesBatchSize);
-
-      for (const trade of trades) {
-        const ts = trade.timestamp ?? trade.match_time ?? trade.last_update;
-
-        // Deterministic fallback ID: hash a composite of all distinguishing fields
-        // to avoid collisions from the weak asset_id-timestamp pair.
-        const tradeId = trade.id ?? createHash('sha256')
-          .update([
-            trade.asset_id,
-            trade.side,
-            trade.price,
-            trade.size,
-            ts ?? '',
-            trade.taker_order_id ?? '',
-            trade.transaction_hash ?? '',
-          ].join('|'))
-          .digest('hex');
-
-        await db.execute(sql`
-          INSERT INTO trades (id, market_id, token_id, side, price, size, timestamp, taker_order_id, transaction_hash, fee_rate_bps)
-          VALUES (
-            ${tradeId},
-            ${marketId},
-            ${trade.asset_id},
-            ${trade.side},
-            ${parseFloat(trade.price)},
-            ${parseFloat(trade.size)},
-            ${ts ? new Date(ts) : new Date()},
-            ${trade.taker_order_id ?? null},
-            ${trade.transaction_hash ?? null},
-            ${trade.fee_rate_bps ? parseInt(trade.fee_rate_bps, 10) : null}
-          )
-          ON CONFLICT (id) DO NOTHING
-        `);
-      }
-
-      this.logger.debug({ tokenId, count: trades.length }, 'Synced trades');
-      return { success: true, count: trades.length };
-    } catch (error) {
-      // If we're unauthorized, abort the whole trades sync quickly to avoid log spam.
-      if (typeof (error as { status?: unknown } | null)?.status === 'number' && (error as { status: number }).status === 401) {
-        throw error;
-      }
-
-      this.logger.error({ tokenId, error }, 'Failed to sync trades');
-      return { success: false, count: 0 };
     }
   }
 
@@ -476,25 +421,6 @@ export class BatchSyncManager {
           updatedAt: new Date(),
         },
       });
-  }
-
-  private hasTradesAuth(): boolean {
-    return Boolean(
-      this.config.polymarketApiKey &&
-        this.config.polymarketApiSecret &&
-        this.config.polymarketPassphrase &&
-        this.config.polymarketAddress
-    );
-  }
-
-  private buildClobAuth() {
-    if (!this.hasTradesAuth()) return undefined;
-    return createPolymarketL2Auth({
-      address: this.config.polymarketAddress!,
-      apiKey: this.config.polymarketApiKey!,
-      secret: this.config.polymarketApiSecret!,
-      passphrase: this.config.polymarketPassphrase!,
-    });
   }
 
   /**

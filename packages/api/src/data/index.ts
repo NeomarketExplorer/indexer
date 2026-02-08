@@ -36,6 +36,31 @@ export const ActivitySchema = z.object({
   transaction_hash: z.string().optional(),
 });
 
+// Public trades feed (global)
+export const PublicTradeSchema = z.object({
+  proxyWallet: z.string().optional(),
+  side: z.enum(['BUY', 'SELL']),
+  asset: z.string(),
+  conditionId: z.string().optional(),
+  size: z.number(),
+  price: z.number(),
+  timestamp: z.number(), // unix seconds
+  transactionHash: z.string().optional(),
+
+  // Extra fields commonly present in the response (kept optional for compatibility)
+  title: z.string().optional(),
+  slug: z.string().optional(),
+  icon: z.string().optional(),
+  eventSlug: z.string().optional(),
+  outcome: z.string().optional(),
+  outcomeIndex: z.number().optional(),
+  name: z.string().optional(),
+  pseudonym: z.string().optional(),
+  bio: z.string().optional(),
+  profileImage: z.string().optional(),
+  profileImageOptimized: z.string().optional(),
+});
+
 export const UserBalanceSchema = z.object({
   usdc: z.number(),
   conditional_tokens: z.record(z.number()),
@@ -44,6 +69,7 @@ export const UserBalanceSchema = z.object({
 export type Position = z.infer<typeof PositionSchema>;
 export type Activity = z.infer<typeof ActivitySchema>;
 export type UserBalance = z.infer<typeof UserBalanceSchema>;
+export type PublicTrade = z.infer<typeof PublicTradeSchema>;
 
 export interface PositionsParams {
   user: string;
@@ -55,6 +81,11 @@ export interface ActivityParams {
   limit?: number;
   offset?: number;
   type?: Activity['type'];
+}
+
+export interface PublicTradesParams {
+  limit?: number;
+  offset?: number;
 }
 
 export class DataClient {
@@ -89,6 +120,17 @@ export class DataClient {
       '/activity',
       { params: { user, ...options } },
       z.array(ActivitySchema)
+    );
+  }
+
+  /**
+   * Get recent public trades (global feed)
+   */
+  async getPublicTrades(limit = 200, offset = 0): Promise<PublicTrade[]> {
+    return this.client.get(
+      '/trades',
+      { params: { limit, offset } },
+      z.array(PublicTradeSchema)
     );
   }
 
