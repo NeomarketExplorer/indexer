@@ -175,20 +175,60 @@ export class RealtimeSyncManager {
     }
 
     const tokenIds = Array.from(this.subscribedTokens);
+    this.sendSubscriptions(tokenIds, { initial: true });
+  }
 
-    const batchSize = 100;
-    const firstBatch = tokenIds.slice(0, batchSize);
-    // The market channel requires the *first* message to be the initial shape:
-    // { type: "market", assets_ids: [...] }. Additional messages must use
-    // operation=subscribe.
-    this.ws.send(JSON.stringify({ type: 'market', assets_ids: firstBatch }));
-
-    for (let i = batchSize; i < tokenIds.length; i += batchSize) {
-      const batch = tokenIds.slice(i, i + batchSize);
-      this.ws.send(JSON.stringify({ operation: 'subscribe', assets_ids: batch }));
+  /**
+   * Send market-channel subscriptions in paced batches.
+   * We avoid blasting hundreds of WS frames in a tight loop, which can trigger
+   * server-side disconnects.
+   */
+  private sendSubscriptions(tokenIds: string[], opts: { initial: boolean }): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || tokenIds.length === 0) {
+      return;
     }
 
-    this.logger.info({ tokenCount: tokenIds.length }, 'Subscribed to price updates');
+    // Tuned for stability: fewer frames, slight pacing.
+    const batchSize = 500;
+    const batchDelayMs = 25;
+
+    const batches: string[][] = [];
+    for (let i = 0; i < tokenIds.length; i += batchSize) {
+      batches.push(tokenIds.slice(i, i + batchSize));
+    }
+
+    const send = (payload: unknown) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.ws.send(JSON.stringify(payload));
+    };
+
+    let i = 0;
+    if (opts.initial) {
+      // The market channel requires the *first* message to be the initial shape:
+      // { type: "market", assets_ids: [...] }. Additional messages must use
+      // operation=subscribe.
+      send({ type: 'market', assets_ids: batches[0] });
+      i = 1;
+    }
+
+    const sendNext = () => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (i >= batches.length) return;
+      send({ operation: 'subscribe', assets_ids: batches[i] });
+      i++;
+      setTimeout(sendNext, batchDelayMs);
+    };
+
+    if (i < batches.length) {
+      setTimeout(sendNext, batchDelayMs);
+    }
+
+    this.logger.info({
+      tokenCount: tokenIds.length,
+      batchSize,
+      batches: batches.length,
+      initial: opts.initial,
+    }, 'Sent market-channel subscriptions');
   }
 
   /**
@@ -197,7 +237,13 @@ export class RealtimeSyncManager {
   private handleMessage(data: string): void {
     try {
       // Server-side protocol errors come back as plaintext.
-      if (data === 'INVALID OPERATION') {
+      if (data === 'INVALID OPERATION' || data === 'NO NEW ASSETS') {
+        return;
+      }
+
+      // Ignore other plaintext messages (e.g. keepalives / status strings).
+      const firstChar = data[0];
+      if (firstChar !== '{' && firstChar !== '[') {
         return;
       }
 
@@ -397,12 +443,7 @@ export class RealtimeSyncManager {
     // If not, subscribeToTokens() will run on connect().
     if (this.ws && this.isConnected && this.subscribedTokens.size > 0) {
       const tokenIds = Array.from(this.subscribedTokens);
-      const batchSize = 100;
-      for (let i = 0; i < tokenIds.length; i += batchSize) {
-        const batch = tokenIds.slice(i, i + batchSize);
-        this.ws.send(JSON.stringify({ operation: 'subscribe', type: 'market', assets_ids: batch }));
-      }
-      this.logger.info({ tokenCount: tokenIds.length }, 'Resubscribed to market channel tokens');
+      this.sendSubscriptions(tokenIds, { initial: false });
       return;
     }
 
