@@ -307,14 +307,24 @@ export class BatchSyncManager {
       const db = getDb();
 
       // Open+active markets (token_id -> market_id mapping for filtering global trades feed)
-      const activeMarkets = await db.query.markets.findMany({
-        where: and(
-          eq(markets.active, true),
-          eq(markets.closed, false),
-          eq(markets.archived, false),
-        ),
-        columns: { id: true, outcomeTokenIds: true },
-      });
+      const marketsWhere = and(
+        eq(markets.active, true),
+        eq(markets.closed, false),
+        eq(markets.archived, false),
+      );
+
+      const activeMarkets = this.config.tradesSyncMarketLimit > 0
+        ? await db.query.markets.findMany({
+          where: marketsWhere,
+          columns: { id: true, outcomeTokenIds: true },
+          // Prefer the most-active markets when we can't track all open ones.
+          orderBy: [desc(markets.volume24hr)],
+          limit: this.config.tradesSyncMarketLimit,
+        })
+        : await db.query.markets.findMany({
+          where: marketsWhere,
+          columns: { id: true, outcomeTokenIds: true },
+        });
 
       const tokenToMarket = new Map<string, string>();
       for (const market of activeMarkets) {

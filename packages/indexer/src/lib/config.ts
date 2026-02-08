@@ -33,7 +33,8 @@ const ConfigSchema = z.object({
   // Batch sizes
   marketsBatchSize: z.coerce.number().int().positive().default(500),
   tradesBatchSize: z.coerce.number().int().positive().default(500),
-  tradesSyncMarketLimit: z.coerce.number().int().positive().default(100),
+  // 0 means "no limit" (track all open markets for trade matching).
+  tradesSyncMarketLimit: z.coerce.number().int().nonnegative().default(0),
 
   // Redis (optional — caching disabled if not set)
   redisUrl: z.string().url().optional(),
