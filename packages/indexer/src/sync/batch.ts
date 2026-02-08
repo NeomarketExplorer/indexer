@@ -729,6 +729,36 @@ export class BatchSyncManager {
       // Pass 1: check the top-N markets.
       await checkMarkets(toCheck);
 
+      // Pass 1b: also check open markets for events that already have some
+      // closed markets in our DB. This catches cases where an event is fully
+      // closed on CLOB but only a few low-volume markets remain marked open
+      // in our DB.
+      const mixedEventOpen = await db.query.markets.findMany({
+        where: and(
+          eq(markets.active, true),
+          eq(markets.closed, false),
+          eq(markets.archived, false),
+          sql`${markets.eventId} IN (
+            SELECT event_id FROM markets
+            WHERE event_id IS NOT NULL
+            GROUP BY event_id
+            HAVING COUNT(*) FILTER (WHERE closed = true) > 0
+               AND COUNT(*) FILTER (WHERE active = true AND closed = false AND archived = false) > 0
+          )`,
+        ),
+        orderBy: [desc(markets.volume24hr)],
+        limit: this.config.clobAuditBatchSize,
+        columns: { id: true, eventId: true, conditionId: true, volume24hr: true },
+      });
+
+      const mixedToCheck = mixedEventOpen
+        .filter(m => (m.conditionId ?? '').length > 0)
+        .filter(m => !checkedMarketIds.has(m.id));
+      if (mixedToCheck.length > 0) {
+        for (const m of mixedToCheck) checkedMarketIds.add(m.id);
+        await checkMarkets(mixedToCheck);
+      }
+
       // Pass 2: if any market in an event was found closed on CLOB, check all
       // remaining "open" markets for those events as well. This quickly fixes
       // events where most markets are closed but a few low-volume ones linger
