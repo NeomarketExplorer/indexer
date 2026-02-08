@@ -82,6 +82,14 @@ healthRouter.get('/sync', async (c) => {
     !eventsSyncError;
 
   const entityStatus = (entity: string) => {
+    if (entity === 'trades' && !config.enableTradesSync) {
+      return {
+        lastSyncAt: null,
+        status: 'disabled',
+        error: null,
+        stale: false,
+      };
+    }
     const s = stateMap[entity];
     return {
       lastSyncAt: s?.lastSyncAt ?? null,

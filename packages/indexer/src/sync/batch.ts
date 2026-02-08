@@ -97,12 +97,17 @@ export class BatchSyncManager {
       this.intervals.push(eventsInterval);
     }, this.config.marketsSyncInterval / 2);
 
-    // Trades sync on its own interval (#3)
-    const tradesInterval = setInterval(
-      () => this.syncAllTrades(),
-      this.config.tradesSyncInterval
-    );
-    this.intervals.push(tradesInterval);
+    // Trades sync is opt-in (Postgres storage can grow very large).
+    if (this.config.enableTradesSync) {
+      const tradesInterval = setInterval(
+        () => this.syncAllTrades(),
+        this.config.tradesSyncInterval
+      );
+      this.intervals.push(tradesInterval);
+    } else {
+      this.updateSyncState('trades', 'disabled', { enabled: false }).catch(() => {});
+      this.logger.info('Trades sync disabled');
+    }
 
     // Expiration audit every 60s — decoupled from sync so expired
     // items are caught even while a long sync is still running
@@ -293,6 +298,9 @@ export class BatchSyncManager {
   // ─── Trades (#3) ─────────────────────────────────────────
 
   async syncAllTrades(): Promise<void> {
+    if (!this.config.enableTradesSync) {
+      return;
+    }
     if (this.isSyncingTrades) {
       this.logger.warn('Trades sync already in progress, skipping');
       return;

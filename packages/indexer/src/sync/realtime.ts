@@ -214,7 +214,9 @@ export class RealtimeSyncManager {
     const sendNext = () => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       if (i >= batches.length) return;
-      send({ operation: 'subscribe', assets_ids: batches[i] });
+      // Include type on subscribe payloads as well; the server can emit plaintext
+      // errors (eg "NO NEW ASSETS") and disconnect when the shape is not accepted.
+      send({ type: 'market', operation: 'subscribe', assets_ids: batches[i] });
       i++;
       setTimeout(sendNext, batchDelayMs);
     };

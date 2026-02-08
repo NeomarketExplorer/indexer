@@ -18,6 +18,14 @@ const ConfigSchema = z.object({
   marketsSyncInterval: z.coerce.number().int().positive().default(5 * 60 * 1000), // 5 minutes
   tradesSyncInterval: z.coerce.number().int().positive().default(60 * 1000), // 1 minute
   priceFlushInterval: z.coerce.number().int().positive().default(1000), // 1 second
+  // Trades ingestion can be very high volume; disable by default in Postgres
+  // (use ClickHouse/Subsquid for full trade history).
+  enableTradesSync: z.preprocess((v) => {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') return v.trim().toLowerCase() === 'true';
+    return undefined;
+  }, z.boolean().default(false)),
 
   // WebSocket
   // Polymarket "market" channel (the legacy /ws endpoint now returns 404)
@@ -81,6 +89,7 @@ export function getConfig(): Config {
     marketsSyncInterval: process.env.MARKETS_SYNC_INTERVAL,
     tradesSyncInterval: process.env.TRADES_SYNC_INTERVAL,
     priceFlushInterval: process.env.PRICE_FLUSH_INTERVAL,
+    enableTradesSync: process.env.ENABLE_TRADES_SYNC,
     wsUrl: process.env.WS_URL,
     wsReconnectInterval: process.env.WS_RECONNECT_INTERVAL,
     wsMaxReconnectAttempts: process.env.WS_MAX_RECONNECT_ATTEMPTS,
