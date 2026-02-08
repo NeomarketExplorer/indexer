@@ -38,6 +38,7 @@ export class BatchSyncManager {
   private syncError: string | null = null;
   private syncProgress = { markets: 0, events: 0, trades: 0 };
   private warnedTradesDisabled = false;
+  private tradesAuthFailed = false;
 
   // Cached event→market linkages from last events sync (#17)
   private eventMarketPairs: Array<{ marketId: string; eventId: string }> = [];
@@ -322,6 +323,12 @@ export class BatchSyncManager {
       return;
     }
 
+    // If we already established that creds are unauthorized, don't keep hammering the API.
+    if (this.tradesAuthFailed) {
+      await this.updateSyncState('trades', 'error', { disabled: true }, 'Unauthorized/Invalid api key');
+      return;
+    }
+
     this.isSyncingTrades = true;
     this.syncProgress.trades = 0;
     const startTime = Date.now();
@@ -366,6 +373,17 @@ export class BatchSyncManager {
       }, 'Trades sync completed');
 
     } catch (error) {
+      const status = typeof (error as { status?: unknown } | null)?.status === 'number'
+        ? (error as { status: number }).status
+        : null;
+
+      if (status === 401) {
+        this.tradesAuthFailed = true;
+        this.logger.error('Trades sync unauthorized (invalid Polymarket API key/secret/passphrase/address combination)');
+        await this.updateSyncState('trades', 'error', { disabled: true }, 'Unauthorized/Invalid api key');
+        return;
+      }
+
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error({ error: errorMessage }, 'Trades sync failed');
       await this.updateSyncState('trades', 'error', null, errorMessage);
@@ -384,6 +402,8 @@ export class BatchSyncManager {
       const trades = await this.clobClient.getTrades(tokenId, this.config.tradesBatchSize);
 
       for (const trade of trades) {
+        const ts = trade.timestamp ?? trade.match_time ?? trade.last_update;
+
         // Deterministic fallback ID: hash a composite of all distinguishing fields
         // to avoid collisions from the weak asset_id-timestamp pair.
         const tradeId = trade.id ?? createHash('sha256')
@@ -392,7 +412,7 @@ export class BatchSyncManager {
             trade.side,
             trade.price,
             trade.size,
-            trade.timestamp ?? '',
+            ts ?? '',
             trade.taker_order_id ?? '',
             trade.transaction_hash ?? '',
           ].join('|'))
@@ -407,7 +427,7 @@ export class BatchSyncManager {
             ${trade.side},
             ${parseFloat(trade.price)},
             ${parseFloat(trade.size)},
-            ${trade.timestamp ? new Date(trade.timestamp) : new Date()},
+            ${ts ? new Date(ts) : new Date()},
             ${trade.taker_order_id ?? null},
             ${trade.transaction_hash ?? null},
             ${trade.fee_rate_bps ? parseInt(trade.fee_rate_bps, 10) : null}
@@ -419,6 +439,11 @@ export class BatchSyncManager {
       this.logger.debug({ tokenId, count: trades.length }, 'Synced trades');
       return { success: true, count: trades.length };
     } catch (error) {
+      // If we're unauthorized, abort the whole trades sync quickly to avoid log spam.
+      if (typeof (error as { status?: unknown } | null)?.status === 'number' && (error as { status: number }).status === 401) {
+        throw error;
+      }
+
       this.logger.error({ tokenId, error }, 'Failed to sync trades');
       return { success: false, count: 0 };
     }

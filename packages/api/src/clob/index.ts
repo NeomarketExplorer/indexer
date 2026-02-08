@@ -32,6 +32,9 @@ export const TradeSchema = z.object({
   size: z.string(),
   fee_rate_bps: z.string().optional(),
   timestamp: z.string().optional(),
+  // Newer CLOB trade objects use match_time/last_update instead of timestamp.
+  match_time: z.string().optional(),
+  last_update: z.string().optional(),
   transaction_hash: z.string().optional(),
 });
 
@@ -55,8 +58,10 @@ export interface OrderbookParams {
 }
 
 export interface TradesParams {
-  token_id: string;
+  asset_id: string;
   limit?: number;
+  before?: string;
+  after?: string;
 }
 
 export interface PriceHistoryParams {
@@ -99,12 +104,12 @@ export class ClobClient {
   }
 
   /**
-   * Get recent trades for a token
+   * Get recent trades for a token (asset_id)
    */
-  async getTrades(tokenId: string, limit = 100): Promise<Trade[]> {
+  async getTrades(assetId: string, limit = 100): Promise<Trade[]> {
     return this.client.get(
-      '/trades',
-      { params: { token_id: tokenId, limit } },
+      '/data/trades',
+      { params: { asset_id: assetId, limit } },
       z.array(TradeSchema)
     );
   }

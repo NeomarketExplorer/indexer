@@ -11,7 +11,7 @@ export interface RequestOptions extends RequestInit {
 
 export interface AuthArgs {
   method: string;
-  requestPath: string; // Path + query, e.g. "/trades?token_id=...&limit=..."
+  requestPath: string; // Path only (no query), e.g. "/data/trades"
   body?: string;
 }
 
@@ -80,7 +80,8 @@ export class ApiClient {
     const { params, timeout = 30000, ...fetchOptions } = options;
     const url = this.buildUrl(path, params);
     const urlObj = new URL(url);
-    const requestPath = `${urlObj.pathname}${urlObj.search}`;
+    // Polymarket CLOB HMAC signing uses the request path only (query is not included).
+    const requestPath = urlObj.pathname;
     const method = (fetchOptions.method ?? 'GET').toUpperCase();
 
     const controller = new AbortController();
