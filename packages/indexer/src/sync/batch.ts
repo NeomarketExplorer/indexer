@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import { and, eq, desc, sql } from 'drizzle-orm';
 import { createGammaClient, type GammaMarket, type GammaEvent } from '@app/api/gamma';
-import { createClobClient } from '@app/api/clob';
+import { createClobClient, createPolymarketL2Auth } from '@app/api/clob';
 import { getDb, markets, events, syncState, type NewMarket, type NewEvent } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
@@ -25,7 +25,8 @@ export class BatchSyncManager {
   private logger = createChildLogger({ module: 'batch-sync' });
   private config = getConfig();
   private gammaClient = createGammaClient({ baseUrl: this.config.gammaApiUrl });
-  private clobClient = createClobClient({ baseUrl: this.config.clobApiUrl });
+  private clobAuth = this.buildClobAuth();
+  private clobClient = createClobClient({ baseUrl: this.config.clobApiUrl, auth: this.clobAuth });
   private intervals: NodeJS.Timeout[] = [];
 
   // Per-entity sync locks (#2)
@@ -36,6 +37,7 @@ export class BatchSyncManager {
   private lastSyncAt: Date | null = null;
   private syncError: string | null = null;
   private syncProgress = { markets: 0, events: 0, trades: 0 };
+  private warnedTradesDisabled = false;
 
   // Cached event→market linkages from last events sync (#17)
   private eventMarketPairs: Array<{ marketId: string; eventId: string }> = [];
@@ -298,6 +300,28 @@ export class BatchSyncManager {
       return;
     }
 
+    if (!this.hasTradesAuth()) {
+      if (!this.warnedTradesDisabled) {
+        this.warnedTradesDisabled = true;
+        this.logger.warn(
+          {
+            missing: [
+              !this.config.polymarketApiKey ? 'POLYMARKET_API_KEY' : null,
+              !this.config.polymarketApiSecret ? 'POLYMARKET_API_SECRET' : null,
+              !this.config.polymarketPassphrase ? 'POLYMARKET_PASSPHRASE' : null,
+              !this.config.polymarketAddress ? 'POLYMARKET_ADDRESS' : null,
+            ].filter(Boolean),
+          },
+          'Trades sync disabled (missing Polymarket CLOB auth env vars)'
+        );
+      }
+      await this.updateSyncState('trades', 'idle', {
+        disabled: true,
+        reason: 'Missing POLYMARKET_* CLOB auth env vars',
+      });
+      return;
+    }
+
     this.isSyncingTrades = true;
     this.syncProgress.trades = 0;
     const startTime = Date.now();
@@ -427,6 +451,25 @@ export class BatchSyncManager {
           updatedAt: new Date(),
         },
       });
+  }
+
+  private hasTradesAuth(): boolean {
+    return Boolean(
+      this.config.polymarketApiKey &&
+        this.config.polymarketApiSecret &&
+        this.config.polymarketPassphrase &&
+        this.config.polymarketAddress
+    );
+  }
+
+  private buildClobAuth() {
+    if (!this.hasTradesAuth()) return undefined;
+    return createPolymarketL2Auth({
+      address: this.config.polymarketAddress!,
+      apiKey: this.config.polymarketApiKey!,
+      secret: this.config.polymarketApiSecret!,
+      passphrase: this.config.polymarketPassphrase!,
+    });
   }
 
   /**

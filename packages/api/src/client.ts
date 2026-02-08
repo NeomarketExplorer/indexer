@@ -9,10 +9,21 @@ export interface RequestOptions extends RequestInit {
   timeout?: number;
 }
 
+export interface AuthArgs {
+  method: string;
+  requestPath: string; // Path + query, e.g. "/trades?token_id=...&limit=..."
+  body?: string;
+}
+
+export type AuthProvider =
+  | ((args: AuthArgs) => Promise<Record<string, string>>)
+  | ((args: AuthArgs) => Record<string, string>);
+
 export interface ApiClientConfig {
   baseUrl: string;
   defaultHeaders?: Record<string, string>;
   onError?: (error: ApiError) => void;
+  auth?: AuthProvider;
 }
 
 export class ApiError extends Error {
@@ -32,11 +43,13 @@ export class ApiClient {
   private baseUrl: string;
   private defaultHeaders: Record<string, string>;
   private onError?: (error: ApiError) => void;
+  private auth?: AuthProvider;
 
   constructor(config: ApiClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.defaultHeaders = config.defaultHeaders ?? {};
     this.onError = config.onError;
+    this.auth = config.auth;
   }
 
   private buildUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
@@ -66,16 +79,28 @@ export class ApiClient {
   ): Promise<T> {
     const { params, timeout = 30000, ...fetchOptions } = options;
     const url = this.buildUrl(path, params);
+    const urlObj = new URL(url);
+    const requestPath = `${urlObj.pathname}${urlObj.search}`;
+    const method = (fetchOptions.method ?? 'GET').toUpperCase();
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
+      const authHeaders = this.auth
+        ? await this.auth({
+            method,
+            requestPath,
+            body: typeof fetchOptions.body === 'string' ? fetchOptions.body : undefined,
+          })
+        : undefined;
+
       const response = await fetch(url, {
         ...fetchOptions,
         headers: {
           'Content-Type': 'application/json',
           ...this.defaultHeaders,
+          ...(authHeaders ?? {}),
           ...fetchOptions.headers,
         },
         signal: controller.signal,

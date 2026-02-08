@@ -30,6 +30,12 @@ const ConfigSchema = z.object({
   clobApiUrl: z.string().url().default('https://clob.polymarket.com'),
   dataApiUrl: z.string().url().default('https://data-api.polymarket.com'),
 
+  // Polymarket CLOB API auth (L2). Required for endpoints like /trades.
+  polymarketApiKey: z.string().optional(),
+  polymarketApiSecret: z.string().optional(),
+  polymarketPassphrase: z.string().optional(),
+  polymarketAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
+
   // Batch sizes
   marketsBatchSize: z.coerce.number().int().positive().default(500),
   tradesBatchSize: z.coerce.number().int().positive().default(500),
@@ -86,6 +92,10 @@ export function getConfig(): Config {
     gammaApiUrl: process.env.GAMMA_API_URL,
     clobApiUrl: process.env.CLOB_API_URL,
     dataApiUrl: process.env.DATA_API_URL,
+    polymarketApiKey: process.env.POLYMARKET_API_KEY,
+    polymarketApiSecret: process.env.POLYMARKET_API_SECRET,
+    polymarketPassphrase: process.env.POLYMARKET_PASSPHRASE,
+    polymarketAddress: process.env.POLYMARKET_ADDRESS,
     marketsBatchSize: process.env.MARKETS_BATCH_SIZE,
     tradesBatchSize: process.env.TRADES_BATCH_SIZE,
     tradesSyncMarketLimit: process.env.TRADES_SYNC_MARKET_LIMIT,

@@ -5,6 +5,7 @@
 
 import { z } from 'zod';
 import { ApiClient, createApiClient, type ApiClientConfig } from '../client';
+export { buildPolyHmacSignature, createPolymarketL2Auth, type PolymarketL2Credentials } from './auth';
 
 // CLOB API Schemas
 export const OrderbookLevelSchema = z.object({
