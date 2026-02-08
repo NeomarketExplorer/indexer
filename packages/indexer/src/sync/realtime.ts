@@ -389,7 +389,7 @@ export class RealtimeSyncManager {
       const batchSize = 100;
       for (let i = 0; i < tokenIds.length; i += batchSize) {
         const batch = tokenIds.slice(i, i + batchSize);
-        this.ws.send(JSON.stringify({ operation: 'subscribe', assets_ids: batch }));
+        this.ws.send(JSON.stringify({ operation: 'subscribe', type: 'market', assets_ids: batch }));
       }
       this.logger.info({ tokenCount: tokenIds.length }, 'Resubscribed to market channel tokens');
       return;
