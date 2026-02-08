@@ -30,19 +30,29 @@ interface WebSocketMessage {
 
 const BUFFER_SIZE_WARNING = 10000;
 
+type WsClient = {
+  id: number;
+  ws: WebSocket | null;
+  isConnected: boolean;
+  isConnecting: boolean;
+  reconnectAttempts: number;
+  // Tokens currently assigned to this client (sharding).
+  assignedTokens: string[];
+  // Tokens we believe we've already subscribed to on this connection.
+  subscribedTokens: Set<string>;
+};
+
 export class RealtimeSyncManager {
   private logger = createChildLogger({ module: 'realtime-sync' });
   private config = getConfig();
-  private ws: WebSocket | null = null;
-  private isConnected = false;
-  private isConnecting = false;
   private isFlushingPrices = false;
   private shouldReconnect = true;
-  private reconnectAttempts = 0;
   private priceBuffer: Map<string, PriceUpdate> = new Map();
   private flushInterval: NodeJS.Timeout | null = null;
   private subscribedTokens: Set<string> = new Set();
   private tokenToMarket: Map<string, string> = new Map();
+  private clients: WsClient[] = [];
+  private lastPublishedPricesStatus: 'connected' | 'disconnected' | null = null;
 
   /**
    * Start real-time sync
@@ -51,7 +61,9 @@ export class RealtimeSyncManager {
     this.logger.info('Starting real-time sync');
 
     await this.loadActiveTokens();
-    await this.connect();
+    this.initClients();
+    this.assignTokenShards();
+    await this.connectAll();
     this.startFlushInterval();
   }
 
@@ -69,12 +81,17 @@ export class RealtimeSyncManager {
 
     await this.flushPrices();
 
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    for (const c of this.clients) {
+      if (c.ws) {
+        c.ws.close();
+        c.ws = null;
+      }
+      c.isConnected = false;
+      c.isConnecting = false;
+      c.reconnectAttempts = 0;
+      c.subscribedTokens.clear();
     }
-
-    this.isConnected = false;
+    this.publishPricesStatus();
   }
 
   /**
@@ -114,52 +131,120 @@ export class RealtimeSyncManager {
   }
 
   /**
-   * Connect to WebSocket server
+   * Initialize WS clients (one per desired connection).
    */
-  private connect(): Promise<void> {
-    if (this.isConnecting || this.isConnected) {
+  private initClients(): void {
+    const count = Math.max(1, this.config.wsConnections);
+    if (this.clients.length === count) return;
+
+    this.clients = Array.from({ length: count }, (_, i): WsClient => ({
+      id: i,
+      ws: null,
+      isConnected: false,
+      isConnecting: false,
+      reconnectAttempts: 0,
+      assignedTokens: [],
+      subscribedTokens: new Set<string>(),
+    }));
+
+    this.logger.info({ wsConnections: count }, 'Initialized WebSocket clients');
+  }
+
+  /**
+   * Stable sharding of token_ids across WS connections.
+   * We use a cheap string hash to keep assignment stable across restarts.
+   */
+  private assignTokenShards(): void {
+    for (const c of this.clients) {
+      c.assignedTokens = [];
+    }
+
+    const tokenIds = Array.from(this.subscribedTokens);
+    const n = this.clients.length;
+
+    for (const tokenId of tokenIds) {
+      const idx = this.hashToken(tokenId) % n;
+      this.clients[idx]!.assignedTokens.push(tokenId);
+    }
+
+    this.logger.info({
+      wsConnections: n,
+      tokenCount: tokenIds.length,
+      shardSizes: this.clients.map(c => c.assignedTokens.length),
+    }, 'Assigned token shards');
+  }
+
+  private hashToken(tokenId: string): number {
+    // FNV-1a 32-bit
+    let h = 0x811c9dc5;
+    for (let i = 0; i < tokenId.length; i++) {
+      h ^= tokenId.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+
+  /**
+   * Connect all WS clients (best-effort; doesn't fail the whole manager).
+   */
+  private async connectAll(): Promise<void> {
+    const results = await Promise.allSettled(
+      this.clients.map(c => this.connectClient(c))
+    );
+    const rejected = results.filter(r => r.status === 'rejected');
+    if (rejected.length > 0) {
+      this.logger.warn({ rejected: rejected.length }, 'Some WebSocket connections failed to start');
+    }
+  }
+
+  /**
+   * Connect a single WebSocket client
+   */
+  private connectClient(client: WsClient): Promise<void> {
+    if (client.isConnecting || client.isConnected) {
       return Promise.resolve();
     }
 
-    this.isConnecting = true;
+    client.isConnecting = true;
 
     return new Promise((resolve, reject) => {
-      this.logger.info({ url: this.config.wsUrl }, 'Connecting to WebSocket');
+      this.logger.info({ url: this.config.wsUrl, clientId: client.id }, 'Connecting to WebSocket');
 
-      this.ws = new WebSocket(this.config.wsUrl);
+      client.ws = new WebSocket(this.config.wsUrl);
 
-      this.ws.on('open', () => {
-        this.isConnecting = false;
-        this.isConnected = true;
-        this.reconnectAttempts = 0;
+      client.ws.on('open', () => {
+        client.isConnecting = false;
+        client.isConnected = true;
+        client.reconnectAttempts = 0;
+        client.subscribedTokens.clear();
 
-        this.logger.info('WebSocket connected');
+        this.logger.info({ clientId: client.id }, 'WebSocket connected');
 
-        this.subscribeToTokens();
-        this.updatePricesSyncState('connected');
+        this.subscribeClientTokens(client, { initial: true });
+        this.publishPricesStatus();
         resolve();
       });
 
-      this.ws.on('message', (data) => {
+      client.ws.on('message', (data) => {
         this.handleMessage(data.toString());
       });
 
-      this.ws.on('close', () => {
-        this.isConnecting = false;
-        this.isConnected = false;
-        this.logger.warn('WebSocket disconnected');
-        this.updatePricesSyncState('disconnected');
+      client.ws.on('close', () => {
+        client.isConnecting = false;
+        client.isConnected = false;
+        this.logger.warn({ clientId: client.id }, 'WebSocket disconnected');
+        this.publishPricesStatus();
 
         if (this.shouldReconnect) {
-          this.scheduleReconnect();
+          this.scheduleReconnect(client);
         }
       });
 
-      this.ws.on('error', (error) => {
-        this.isConnecting = false;
-        this.logger.error({ error }, 'WebSocket error');
+      client.ws.on('error', (error) => {
+        client.isConnecting = false;
+        this.logger.error({ error, clientId: client.id }, 'WebSocket error');
 
-        if (!this.isConnected) {
+        if (!client.isConnected) {
           reject(error);
         }
       });
@@ -167,15 +252,17 @@ export class RealtimeSyncManager {
   }
 
   /**
-   * Subscribe to price updates for all active tokens
+   * Subscribe assigned tokens for a single WS client.
    */
-  private subscribeToTokens(): void {
-    if (!this.ws || this.subscribedTokens.size === 0) {
+  private subscribeClientTokens(client: WsClient, opts: { initial: boolean }): void {
+    if (!client.ws || client.ws.readyState !== WebSocket.OPEN || client.assignedTokens.length === 0) {
       return;
     }
 
-    const tokenIds = Array.from(this.subscribedTokens);
-    this.sendSubscriptions(tokenIds, { initial: true });
+    const tokenIds = client.assignedTokens;
+    this.sendSubscriptions(client.ws, tokenIds, opts);
+    // We treat the whole shard as subscribed after send; server-side behavior is best-effort.
+    for (const t of tokenIds) client.subscribedTokens.add(t);
   }
 
   /**
@@ -183,8 +270,8 @@ export class RealtimeSyncManager {
    * We avoid blasting hundreds of WS frames in a tight loop, which can trigger
    * server-side disconnects.
    */
-  private sendSubscriptions(tokenIds: string[], opts: { initial: boolean }): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || tokenIds.length === 0) {
+  private sendSubscriptions(ws: WebSocket, tokenIds: string[], opts: { initial: boolean }): void {
+    if (ws.readyState !== WebSocket.OPEN || tokenIds.length === 0) {
       return;
     }
 
@@ -198,8 +285,8 @@ export class RealtimeSyncManager {
     }
 
     const send = (payload: unknown) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      this.ws.send(JSON.stringify(payload));
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify(payload));
     };
 
     let i = 0;
@@ -212,7 +299,7 @@ export class RealtimeSyncManager {
     }
 
     const sendNext = () => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (ws.readyState !== WebSocket.OPEN) return;
       if (i >= batches.length) return;
       // Include type on subscribe payloads as well; the server can emit plaintext
       // errors (eg "NO NEW ASSETS") and disconnect when the shape is not accepted.
@@ -405,30 +492,30 @@ export class RealtimeSyncManager {
    * After max fast-backoff attempts, keeps retrying at a slower 60s interval
    * instead of giving up permanently.
    */
-  private scheduleReconnect(): void {
-    this.reconnectAttempts++;
-    const isPastMax = this.reconnectAttempts > this.config.wsMaxReconnectAttempts;
+  private scheduleReconnect(client: WsClient): void {
+    client.reconnectAttempts++;
+    const isPastMax = client.reconnectAttempts > this.config.wsMaxReconnectAttempts;
 
     // Fast exponential backoff up to max, then slow fixed interval
     const delay = isPastMax
       ? 60_000
-      : Math.min(this.config.wsReconnectInterval * Math.pow(2, this.reconnectAttempts - 1), 30_000);
+      : Math.min(this.config.wsReconnectInterval * Math.pow(2, client.reconnectAttempts - 1), 30_000);
 
     if (isPastMax) {
       // Log periodically, not every attempt
-      if (this.reconnectAttempts % 10 === 0) {
-        this.logger.error({ attempt: this.reconnectAttempts }, 'WebSocket still reconnecting at slow interval');
+      if (client.reconnectAttempts % 10 === 0) {
+        this.logger.error({ attempt: client.reconnectAttempts, clientId: client.id }, 'WebSocket still reconnecting at slow interval');
       }
     } else {
-      this.logger.info({ attempt: this.reconnectAttempts, delay }, 'Scheduling reconnect');
+      this.logger.info({ attempt: client.reconnectAttempts, delay, clientId: client.id }, 'Scheduling reconnect');
     }
 
     setTimeout(async () => {
-      if (this.shouldReconnect && !this.isConnected) {
+      if (this.shouldReconnect && !client.isConnected) {
         try {
-          await this.connect();
+          await this.connectClient(client);
         } catch (error) {
-          this.logger.error({ error }, 'Reconnection failed');
+          this.logger.error({ error, clientId: client.id }, 'Reconnection failed');
           // The 'close' handler will call scheduleReconnect again
         }
       }
@@ -440,22 +527,25 @@ export class RealtimeSyncManager {
    */
   async resubscribe(): Promise<void> {
     await this.loadActiveTokens();
+    this.initClients();
+    this.assignTokenShards();
 
     // If connected, add tokens via operation=subscribe (market channel).
     // If not, subscribeToTokens() will run on connect().
-    if (this.ws && this.isConnected && this.subscribedTokens.size > 0) {
-      const tokenIds = Array.from(this.subscribedTokens);
-      this.sendSubscriptions(tokenIds, { initial: false });
-      return;
+    for (const c of this.clients) {
+      if (!c.ws || !c.isConnected) continue;
+      const next = c.assignedTokens;
+      const toAdd = next.filter(t => !c.subscribedTokens.has(t));
+      if (toAdd.length === 0) continue;
+      this.sendSubscriptions(c.ws, toAdd, { initial: false });
+      for (const t of toAdd) c.subscribedTokens.add(t);
     }
-
-    this.subscribeToTokens();
   }
 
   /**
    * Persist WS connection status into sync_state for health checks
    */
-  private updatePricesSyncState(status: string): void {
+  private updatePricesSyncState(status: 'connected' | 'disconnected'): void {
     const db = getDb();
     db.insert(syncState)
       .values({
@@ -474,6 +564,14 @@ export class RealtimeSyncManager {
       .catch(err => this.logger.debug({ err }, 'Failed to update prices sync state'));
   }
 
+  private publishPricesStatus(): void {
+    const anyConnected = this.clients.some(c => c.isConnected);
+    const status: 'connected' | 'disconnected' = anyConnected ? 'connected' : 'disconnected';
+    if (this.lastPublishedPricesStatus === status) return;
+    this.lastPublishedPricesStatus = status;
+    this.updatePricesSyncState(status);
+  }
+
   /**
    * Get status
    */
@@ -482,12 +580,18 @@ export class RealtimeSyncManager {
     subscribedTokens: number;
     bufferedUpdates: number;
     reconnectAttempts: number;
+    connections: number;
+    connectedConnections: number;
   } {
+    const connectedConnections = this.clients.filter(c => c.isConnected).length;
+    const reconnectAttempts = this.clients.reduce((max, c) => Math.max(max, c.reconnectAttempts), 0);
     return {
-      isConnected: this.isConnected,
+      isConnected: connectedConnections > 0,
       subscribedTokens: this.subscribedTokens.size,
       bufferedUpdates: this.priceBuffer.size,
-      reconnectAttempts: this.reconnectAttempts,
+      reconnectAttempts,
+      connections: this.clients.length || 1,
+      connectedConnections,
     };
   }
 }

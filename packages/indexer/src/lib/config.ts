@@ -32,6 +32,7 @@ const ConfigSchema = z.object({
   wsUrl: z.string().url().default('wss://ws-subscriptions-clob.polymarket.com/ws/market'),
   wsReconnectInterval: z.coerce.number().int().positive().default(3000),
   wsMaxReconnectAttempts: z.coerce.number().int().positive().default(10),
+  wsConnections: z.coerce.number().int().positive().default(1),
 
   // API URLs
   gammaApiUrl: z.string().url().default('https://gamma-api.polymarket.com'),
@@ -93,6 +94,7 @@ export function getConfig(): Config {
     wsUrl: process.env.WS_URL,
     wsReconnectInterval: process.env.WS_RECONNECT_INTERVAL,
     wsMaxReconnectAttempts: process.env.WS_MAX_RECONNECT_ATTEMPTS,
+    wsConnections: process.env.WS_CONNECTIONS,
     gammaApiUrl: process.env.GAMMA_API_URL,
     clobApiUrl: process.env.CLOB_API_URL,
     dataApiUrl: process.env.DATA_API_URL,
