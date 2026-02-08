@@ -65,9 +65,21 @@ healthRouter.get('/sync', async (c) => {
     return (now - new Date(s.lastSyncAt).getTime()) > threshold;
   };
 
+  const isError = (entity: string): boolean => {
+    const s = stateMap[entity];
+    return s?.status === 'error';
+  };
+
   const marketsSyncStale = isStale('markets');
   const eventsSyncStale = isStale('events');
-  const isHealthy = !marketsSyncStale && !eventsSyncStale;
+  const marketsSyncError = isError('markets');
+  const eventsSyncError = isError('events');
+
+  const isHealthy =
+    !marketsSyncStale &&
+    !eventsSyncStale &&
+    !marketsSyncError &&
+    !eventsSyncError;
 
   const entityStatus = (entity: string) => {
     const s = stateMap[entity];
