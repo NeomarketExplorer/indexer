@@ -633,7 +633,7 @@ export class BatchSyncManager {
       RETURNING id
     `);
 
-    const count = result.rows?.length ?? result.length ?? 0;
+    const count = result.length;
     this.logger.info({ count }, 'Expired markets audit completed');
     if (count > 0) {
       await invalidateCache('neomarket:cache:GET:/markets*');
@@ -657,7 +657,7 @@ export class BatchSyncManager {
       RETURNING id
     `);
 
-    const count = result.rows?.length ?? result.length ?? 0;
+    const count = result.length;
     this.logger.info({ count }, 'Expired events audit completed');
     if (count > 0) {
       await invalidateCache('neomarket:cache:GET:/events*');
@@ -686,7 +686,7 @@ export class BatchSyncManager {
       RETURNING id
     `);
 
-    const count = result.rows?.length ?? result.length ?? 0;
+    const count = result.length;
     this.logger.info({ count }, 'Events with no active markets audit completed');
     if (count > 0) {
       await invalidateCache('neomarket:cache:GET:/events*');
