@@ -14,8 +14,9 @@ interface BucketEntry {
 
 const buckets = new Map<string, BucketEntry>();
 
-// Periodically clean up expired entries to prevent memory leaks
-setInterval(() => {
+// Periodically clean up expired entries to prevent memory leaks.
+// .unref() so this interval doesn't keep short-lived processes alive (tests, scripts).
+const cleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of buckets) {
     if (now - entry.lastRefill > 10 * 60_000) {
@@ -23,6 +24,7 @@ setInterval(() => {
     }
   }
 }, 60_000);
+cleanupInterval.unref();
 
 export interface RateLimitOptions {
   /** Max steady-state requests per window */
