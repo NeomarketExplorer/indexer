@@ -47,11 +47,22 @@ export const PriceHistoryPointSchema = z.object({
   p: z.number(),
 });
 
+// CLOB market details (by condition_id) - used for determining whether a market is tradable.
+export const ClobMarketSchema = z.object({
+  condition_id: z.string(),
+  active: z.boolean().optional(),
+  closed: z.boolean(),
+  archived: z.boolean().optional(),
+  accepting_orders: z.boolean().optional(),
+  enable_order_book: z.boolean().optional(),
+});
+
 export type OrderbookLevel = z.infer<typeof OrderbookLevelSchema>;
 export type Orderbook = z.infer<typeof OrderbookSchema>;
 export type Trade = z.infer<typeof TradeSchema>;
 export type Midpoint = z.infer<typeof MidpointSchema>;
 export type PriceHistoryPoint = z.infer<typeof PriceHistoryPointSchema>;
+export type ClobMarket = z.infer<typeof ClobMarketSchema>;
 
 export interface OrderbookParams {
   token_id: string;
@@ -88,6 +99,17 @@ export class ClobClient {
       '/book',
       { params: { token_id: tokenId } },
       OrderbookSchema
+    );
+  }
+
+  /**
+   * Get market details by condition_id (CLOB is authoritative for tradability).
+   */
+  async getMarket(conditionId: string): Promise<ClobMarket> {
+    return this.client.get(
+      `/markets/${conditionId}`,
+      undefined,
+      ClobMarketSchema
     );
   }
 

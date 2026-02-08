@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import { and, eq, desc, sql } from 'drizzle-orm';
 import { createGammaClient, type GammaMarket, type GammaEvent } from '@app/api/gamma';
 import { createDataClient } from '@app/api/data';
+import { createClobClient } from '@app/api/clob';
 import { getDb, markets, events, trades, syncState, type NewMarket, type NewEvent } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
@@ -26,6 +27,7 @@ export class BatchSyncManager {
   private config = getConfig();
   private gammaClient = createGammaClient({ baseUrl: this.config.gammaApiUrl });
   private dataClient = createDataClient({ baseUrl: this.config.dataApiUrl });
+  private clobClient = createClobClient({ baseUrl: this.config.clobApiUrl });
   private intervals: NodeJS.Timeout[] = [];
 
   // Per-entity sync locks (#2)
@@ -116,6 +118,17 @@ export class BatchSyncManager {
       60_000
     );
     this.intervals.push(auditInterval);
+
+    // Reconcile Gamma "active/closed" with CLOB tradability.
+    // Runs at a lower cadence to avoid hammering CLOB.
+    const clobAuditInterval = setInterval(
+      () => this.auditClobTradability(),
+      this.config.clobAuditIntervalMs
+    );
+    this.intervals.push(clobAuditInterval);
+
+    // Also run once shortly after startup.
+    setTimeout(() => this.auditClobTradability(), 2 * 60_000);
 
     this.logger.info({
       marketsSyncInterval: this.config.marketsSyncInterval,
@@ -484,9 +497,16 @@ export class BatchSyncManager {
           volume: sql`excluded.volume`,
           volume24hr: sql`excluded.volume_24hr`,
           liquidity: sql`excluded.liquidity`,
-          active: sql`excluded.active`,
-          closed: sql`excluded.closed`,
-          archived: sql`excluded.archived`,
+          // Never "re-open" events once closed/archived (#CLOB-audit consistency)
+          closed: sql`${events.closed} OR excluded.closed`,
+          archived: sql`${events.archived} OR excluded.archived`,
+          active: sql`
+            CASE
+              WHEN ${events.closed} = true OR excluded.closed = true THEN false
+              WHEN ${events.archived} = true OR excluded.archived = true THEN false
+              ELSE excluded.active
+            END
+          `,
           updatedAt: sql`excluded.updated_at`,
         },
       });
@@ -599,9 +619,16 @@ export class BatchSyncManager {
           icon: sql`excluded.icon`,
           category: sql`excluded.category`,
           endDateIso: sql`excluded.end_date_iso`,
-          active: sql`excluded.active`,
-          closed: sql`excluded.closed`,
-          archived: sql`excluded.archived`,
+          // Never "re-open" markets once closed/archived (#CLOB-audit consistency)
+          closed: sql`${markets.closed} OR excluded.closed`,
+          archived: sql`${markets.archived} OR excluded.archived`,
+          active: sql`
+            CASE
+              WHEN ${markets.closed} = true OR excluded.closed = true THEN false
+              WHEN ${markets.archived} = true OR excluded.archived = true THEN false
+              ELSE excluded.active
+            END
+          `,
           updatedAt: sql`excluded.updated_at`,
         },
       });
@@ -630,6 +657,126 @@ export class BatchSyncManager {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error({ error: errorMessage }, 'Expiration audit failed');
+    }
+  }
+
+  // ─── CLOB audit ───────────────────────────────────────────
+
+  /**
+   * Reconcile markets marked open in our DB against the CLOB market status.
+   * Gamma can keep active=true / closed=false for items that are no longer tradable.
+   */
+  private async auditClobTradability(): Promise<void> {
+    const startTime = Date.now();
+    const db = getDb();
+
+    try {
+      await this.updateSyncState('clob_audit', 'syncing');
+
+      const candidates = await db.query.markets.findMany({
+        where: and(
+          eq(markets.active, true),
+          eq(markets.closed, false),
+          eq(markets.archived, false),
+        ),
+        orderBy: [desc(markets.volume24hr)],
+        limit: this.config.clobAuditBatchSize,
+        columns: { id: true, eventId: true, conditionId: true, volume24hr: true },
+      });
+
+      const toCheck = candidates.filter(m => (m.conditionId ?? '').length > 0);
+      if (toCheck.length === 0) {
+        await this.updateSyncState('clob_audit', 'idle', { checked: 0, closed: 0, durationMs: Date.now() - startTime });
+        return;
+      }
+
+      const closedMarketIds: string[] = [];
+      const touchedEventIds = new Set<string>();
+
+      // Simple concurrency pool
+      const concurrency = Math.max(1, this.config.clobAuditConcurrency);
+      let idx = 0;
+
+      const worker = async () => {
+        while (true) {
+          const i = idx++;
+          if (i >= toCheck.length) return;
+          const m = toCheck[i]!;
+
+          try {
+            const status = await this.clobClient.getMarket(m.conditionId);
+            const isClosed =
+              status.closed === true ||
+              status.accepting_orders === false ||
+              status.enable_order_book === false;
+
+            if (isClosed) {
+              closedMarketIds.push(m.id);
+              if (m.eventId) touchedEventIds.add(m.eventId);
+            }
+          } catch (error) {
+            // CLOB 404s or transient errors should not break the whole audit.
+            this.logger.warn({ error, marketId: m.id, conditionId: m.conditionId }, 'CLOB market audit failed for market');
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+      let closedCount = 0;
+      if (closedMarketIds.length > 0) {
+        const idList = sql.join(closedMarketIds.map(id => sql`${id}`), sql`,`);
+        const updated = await db.execute(sql`
+          UPDATE markets
+          SET closed = true, active = false, updated_at = NOW()
+          WHERE id IN (${idList})
+          RETURNING id, event_id
+        `) as unknown as Array<{ id: string; event_id: string | null }>;
+        closedCount = updated.length;
+        for (const r of updated) {
+          if (r.event_id) touchedEventIds.add(r.event_id);
+        }
+
+        // Close/deactivate events that have no remaining open markets.
+        if (touchedEventIds.size > 0) {
+          const eList = sql.join(Array.from(touchedEventIds).map(id => sql`${id}`), sql`,`);
+          await db.execute(sql`
+            UPDATE events e
+            SET active = false, closed = true, updated_at = NOW()
+            WHERE e.id IN (${eList})
+              AND NOT EXISTS (
+                SELECT 1 FROM markets m
+                WHERE m.event_id = e.id
+                  AND m.active = true
+                  AND m.closed = false
+                  AND m.archived = false
+              )
+          `);
+        }
+      }
+
+      if (closedCount > 0) {
+        await invalidateCache('neomarket:cache:GET:/markets*');
+        await invalidateCache('neomarket:cache:GET:/events*');
+        await invalidateCache('neomarket:cache:GET:/stats*');
+      }
+
+      await this.updateSyncState('clob_audit', 'idle', {
+        checked: toCheck.length,
+        closed: closedCount,
+        durationMs: Date.now() - startTime,
+      });
+
+      this.logger.info({
+        checked: toCheck.length,
+        closed: closedCount,
+        durationMs: Date.now() - startTime,
+      }, 'CLOB tradability audit completed');
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error({ error }, 'CLOB tradability audit failed');
+      await this.updateSyncState('clob_audit', 'error', null, errorMessage);
     }
   }
 

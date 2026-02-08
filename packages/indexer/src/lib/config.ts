@@ -39,6 +39,11 @@ const ConfigSchema = z.object({
   clobApiUrl: z.string().url().default('https://clob.polymarket.com'),
   dataApiUrl: z.string().url().default('https://data-api.polymarket.com'),
 
+  // CLOB audit (reconciles Gamma "active" with CLOB tradability)
+  clobAuditIntervalMs: z.coerce.number().int().positive().default(10 * 60 * 1000), // 10 minutes
+  clobAuditBatchSize: z.coerce.number().int().positive().default(500),
+  clobAuditConcurrency: z.coerce.number().int().positive().default(8),
+
   // Batch sizes
   marketsBatchSize: z.coerce.number().int().positive().default(500),
   tradesBatchSize: z.coerce.number().int().positive().default(500),
@@ -98,6 +103,9 @@ export function getConfig(): Config {
     gammaApiUrl: process.env.GAMMA_API_URL,
     clobApiUrl: process.env.CLOB_API_URL,
     dataApiUrl: process.env.DATA_API_URL,
+    clobAuditIntervalMs: process.env.CLOB_AUDIT_INTERVAL_MS,
+    clobAuditBatchSize: process.env.CLOB_AUDIT_BATCH_SIZE,
+    clobAuditConcurrency: process.env.CLOB_AUDIT_CONCURRENCY,
     marketsBatchSize: process.env.MARKETS_BATCH_SIZE,
     tradesBatchSize: process.env.TRADES_BATCH_SIZE,
     tradesSyncMarketLimit: process.env.TRADES_SYNC_MARKET_LIMIT,
