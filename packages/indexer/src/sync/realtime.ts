@@ -171,15 +171,15 @@ export class RealtimeSyncManager {
     const tokenIds = Array.from(this.subscribedTokens);
 
     const batchSize = 100;
-    for (let i = 0; i < tokenIds.length; i += batchSize) {
+    const firstBatch = tokenIds.slice(0, batchSize);
+    // The market channel requires the *first* message to be the initial shape:
+    // { type: "market", assets_ids: [...] }. Additional messages must use
+    // operation=subscribe.
+    this.ws.send(JSON.stringify({ type: 'market', assets_ids: firstBatch }));
+
+    for (let i = batchSize; i < tokenIds.length; i += batchSize) {
       const batch = tokenIds.slice(i, i + batchSize);
-
-      // Polymarket market-channel initial subscription message.
-      // Subsequent subscriptions use operation=subscribe, but sending the initial
-      // shape is accepted at connect time and keeps the protocol simple.
-      const subscription = { type: 'market', assets_ids: batch };
-
-      this.ws.send(JSON.stringify(subscription));
+      this.ws.send(JSON.stringify({ operation: 'subscribe', assets_ids: batch }));
     }
 
     this.logger.info({ tokenCount: tokenIds.length }, 'Subscribed to price updates');
@@ -190,6 +190,11 @@ export class RealtimeSyncManager {
    */
   private handleMessage(data: string): void {
     try {
+      // Server-side protocol errors come back as plaintext.
+      if (data === 'INVALID OPERATION') {
+        return;
+      }
+
       const parsed = JSON.parse(data) as WebSocketMessage | unknown[];
 
       // Orderbook snapshot: array of entries, each for a tokenId.
