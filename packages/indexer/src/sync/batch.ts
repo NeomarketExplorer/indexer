@@ -692,36 +692,70 @@ export class BatchSyncManager {
 
       const closedMarketIds: string[] = [];
       const touchedEventIds = new Set<string>();
+      const checkedMarketIds = new Set<string>(toCheck.map(m => m.id));
 
       // Simple concurrency pool
       const concurrency = Math.max(1, this.config.clobAuditConcurrency);
-      let idx = 0;
+      const checkMarkets = async (marketsToCheck: typeof toCheck) => {
+        let idx = 0;
 
-      const worker = async () => {
-        while (true) {
-          const i = idx++;
-          if (i >= toCheck.length) return;
-          const m = toCheck[i]!;
+        const worker = async () => {
+          while (true) {
+            const i = idx++;
+            if (i >= marketsToCheck.length) return;
+            const m = marketsToCheck[i]!;
 
-          try {
-            const status = await this.clobClient.getMarket(m.conditionId);
-            const isClosed =
-              status.closed === true ||
-              status.accepting_orders === false ||
-              status.enable_order_book === false;
+            try {
+              const status = await this.clobClient.getMarket(m.conditionId);
+              const isClosed =
+                status.closed === true ||
+                status.accepting_orders === false ||
+                status.enable_order_book === false;
 
-            if (isClosed) {
-              closedMarketIds.push(m.id);
-              if (m.eventId) touchedEventIds.add(m.eventId);
+              if (isClosed) {
+                closedMarketIds.push(m.id);
+                if (m.eventId) touchedEventIds.add(m.eventId);
+              }
+            } catch (error) {
+              // CLOB 404s or transient errors should not break the whole audit.
+              this.logger.warn({ error, marketId: m.id, conditionId: m.conditionId }, 'CLOB market audit failed for market');
             }
-          } catch (error) {
-            // CLOB 404s or transient errors should not break the whole audit.
-            this.logger.warn({ error, marketId: m.id, conditionId: m.conditionId }, 'CLOB market audit failed for market');
           }
-        }
+        };
+
+        await Promise.all(Array.from({ length: concurrency }, () => worker()));
       };
 
-      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      // Pass 1: check the top-N markets.
+      await checkMarkets(toCheck);
+
+      // Pass 2: if any market in an event was found closed on CLOB, check all
+      // remaining "open" markets for those events as well. This quickly fixes
+      // events where most markets are closed but a few low-volume ones linger
+      // as "live" in our DB.
+      if (touchedEventIds.size > 0) {
+        const eIds = Array.from(touchedEventIds);
+        const eList = sql.join(eIds.map(id => sql`${id}`), sql`,`);
+        const more = await db.query.markets.findMany({
+          where: and(
+            sql`${markets.eventId} IN (${eList})`,
+            eq(markets.active, true),
+            eq(markets.closed, false),
+            eq(markets.archived, false),
+          ),
+          columns: { id: true, eventId: true, conditionId: true, volume24hr: true },
+          limit: this.config.clobAuditBatchSize, // cap worst-case fanout
+        });
+
+        const extraToCheck = more
+          .filter(m => (m.conditionId ?? '').length > 0)
+          .filter(m => !checkedMarketIds.has(m.id));
+
+        if (extraToCheck.length > 0) {
+          for (const m of extraToCheck) checkedMarketIds.add(m.id);
+          await checkMarkets(extraToCheck);
+        }
+      }
 
       let closedCount = 0;
       if (closedMarketIds.length > 0) {
