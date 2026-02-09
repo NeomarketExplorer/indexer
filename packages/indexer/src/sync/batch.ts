@@ -111,8 +111,8 @@ export class BatchSyncManager {
       this.logger.info('Trades sync disabled');
     }
 
-    // Expiration audit every 60s — decoupled from sync so expired
-    // items are caught even while a long sync is still running
+    // Lightweight consistency audit every 60s — decoupled from sync so
+    // stale derived state is corrected even while a long sync is running.
     const auditInterval = setInterval(
       () => this.runExpirationAudit(),
       60_000
@@ -204,9 +204,6 @@ export class BatchSyncManager {
       // Link markets to events (works for markets that already exist)
       await this.applyEventMarketLinks();
 
-      // Deactivate events whose end date has passed
-      await this.auditExpiredEvents();
-
       await this.updateSyncState('events', 'idle', { count: totalEvents, durationMs: Date.now() - startTime });
 
       // Targeted invalidation (#11)
@@ -278,9 +275,6 @@ export class BatchSyncManager {
       if (includeClosed) {
         await fetchByFilter({ closed: true });
       }
-
-      // Deactivate markets whose end date has passed
-      await this.auditExpiredMarkets();
 
       await this.updateSyncState('markets', 'idle', { count: totalMarkets, durationMs: Date.now() - startTime });
 
@@ -651,9 +645,7 @@ export class BatchSyncManager {
    */
   private async runExpirationAudit(): Promise<void> {
     try {
-      await this.auditExpiredMarkets();
       await this.auditEventsWithNoActiveMarkets();
-      await this.auditExpiredEvents();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error({ error: errorMessage }, 'Expiration audit failed');
@@ -683,7 +675,6 @@ export class BatchSyncManager {
       const cursorConditionId = typeof prevCursor === 'string' ? prevCursor : '';
 
       const baseWhere = and(
-        eq(markets.active, true),
         eq(markets.closed, false),
         eq(markets.archived, false),
         sql`length(${markets.conditionId}) > 0`,
@@ -775,7 +766,6 @@ export class BatchSyncManager {
           const more = await db.query.markets.findMany({
           where: and(
             sql`${markets.eventId} IN (${eList})`,
-            eq(markets.active, true),
             eq(markets.closed, false),
             eq(markets.archived, false),
           ),
@@ -818,7 +808,6 @@ export class BatchSyncManager {
               AND NOT EXISTS (
                 SELECT 1 FROM markets m
                 WHERE m.event_id = e.id
-                  AND m.active = true
                   AND m.closed = false
                   AND m.archived = false
               )
@@ -852,55 +841,6 @@ export class BatchSyncManager {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error({ error }, 'CLOB tradability audit failed');
       await this.updateSyncState('clob_audit', 'error', null, errorMessage);
-    }
-  }
-
-  /**
-   * Mark markets as inactive when their end date has passed.
-   * Only targets open (not yet resolved) markets — closed markets
-   * are already resolved by Polymarket and should keep their state.
-   */
-  private async auditExpiredMarkets(): Promise<void> {
-    const db = getDb();
-    const result = await db.execute(sql`
-      UPDATE markets
-      SET active = false, updated_at = NOW()
-      WHERE active = true
-        AND closed = false
-        AND end_date_iso IS NOT NULL
-        AND end_date_iso::timestamptz < NOW()
-      RETURNING id
-    `);
-
-    const count = result.length;
-    this.logger.info({ count }, 'Expired markets audit completed');
-    if (count > 0) {
-      await invalidateCache('neomarket:cache:GET:/markets*');
-      await invalidateCache('neomarket:cache:GET:/stats*');
-    }
-  }
-
-  /**
-   * Mark events as inactive when their end date has passed.
-   * Only targets open (not yet resolved) events.
-   */
-  private async auditExpiredEvents(): Promise<void> {
-    const db = getDb();
-    const result = await db.execute(sql`
-      UPDATE events
-      SET active = false, updated_at = NOW()
-      WHERE active = true
-        AND closed = false
-        AND end_date IS NOT NULL
-        AND end_date < NOW()
-      RETURNING id
-    `);
-
-    const count = result.length;
-    this.logger.info({ count }, 'Expired events audit completed');
-    if (count > 0) {
-      await invalidateCache('neomarket:cache:GET:/events*');
-      await invalidateCache('neomarket:cache:GET:/stats*');
     }
   }
 
