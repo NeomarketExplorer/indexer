@@ -43,6 +43,10 @@ const ConfigSchema = z.object({
   clobAuditIntervalMs: z.coerce.number().int().positive().default(10 * 60 * 1000), // 10 minutes
   clobAuditBatchSize: z.coerce.number().int().positive().default(500),
   clobAuditConcurrency: z.coerce.number().int().positive().default(8),
+  // Subset of the audit batch that always targets the highest-volume markets first.
+  // This reduces user-facing inconsistencies on popular events while the cursor sweep
+  // converges through the full open-market set.
+  clobAuditPriorityBatchSize: z.coerce.number().int().nonnegative().default(100),
 
   // Batch sizes
   marketsBatchSize: z.coerce.number().int().positive().default(500),
@@ -106,6 +110,7 @@ export function getConfig(): Config {
     clobAuditIntervalMs: process.env.CLOB_AUDIT_INTERVAL_MS,
     clobAuditBatchSize: process.env.CLOB_AUDIT_BATCH_SIZE,
     clobAuditConcurrency: process.env.CLOB_AUDIT_CONCURRENCY,
+    clobAuditPriorityBatchSize: process.env.CLOB_AUDIT_PRIORITY_BATCH_SIZE,
     marketsBatchSize: process.env.MARKETS_BATCH_SIZE,
     tradesBatchSize: process.env.TRADES_BATCH_SIZE,
     tradesSyncMarketLimit: process.env.TRADES_SYNC_MARKET_LIMIT,

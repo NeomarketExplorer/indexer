@@ -681,12 +681,29 @@ export class BatchSyncManager {
       );
 
       const batchSize = this.config.clobAuditBatchSize;
+      const prioritySize = Math.min(
+        batchSize,
+        Math.max(0, this.config.clobAuditPriorityBatchSize)
+      );
+
+      // Always audit the most-active markets first. This makes high-traffic
+      // pages converge quickly even if the cursor sweep hasn't reached them yet.
+      const priority = prioritySize > 0
+        ? await db.query.markets.findMany({
+          where: baseWhere,
+          orderBy: [desc(markets.volume24hr)],
+          limit: prioritySize,
+          columns: { id: true, eventId: true, conditionId: true },
+        })
+        : [];
+      const priorityIds = new Set(priority.map(p => p.id));
 
       let wrapped = false;
+      const sweepLimit = Math.max(0, batchSize - priority.length);
       let sweep = await db.query.markets.findMany({
         where: and(baseWhere, sql`${markets.conditionId} > ${cursorConditionId}`),
         orderBy: [sql`${markets.conditionId} ASC`],
-        limit: batchSize,
+        limit: sweepLimit,
         columns: { id: true, eventId: true, conditionId: true },
       });
 
@@ -696,12 +713,15 @@ export class BatchSyncManager {
         sweep = await db.query.markets.findMany({
           where: baseWhere,
           orderBy: [sql`${markets.conditionId} ASC`],
-          limit: batchSize,
+          limit: sweepLimit,
           columns: { id: true, eventId: true, conditionId: true },
         });
       }
 
-      const toCheck = sweep;
+      const toCheck = [
+        ...priority,
+        ...sweep.filter(s => !priorityIds.has(s.id)),
+      ];
       if (toCheck.length === 0) {
         await this.updateSyncState('clob_audit', 'idle', {
           checked: 0,
