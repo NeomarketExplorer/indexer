@@ -44,7 +44,7 @@ async function main() {
     const eventIds = batch.map(e => e.id);
     const idList = sql.join(eventIds.map(id => sql`${id}`), sql`,`);
     const tagRows = await db.execute(sql`
-      SELECT et.event_id, t.label
+      SELECT et.event_id, t.name AS label
       FROM event_tags et
       JOIN tags t ON t.id = et.tag_id
       WHERE et.event_id IN (${idList})
