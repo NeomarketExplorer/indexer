@@ -9,7 +9,8 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { eq, desc, asc, and, sql, inArray, gte } from 'drizzle-orm';
-import { getDb, markets, priceHistory, trades } from '../../db';
+import type { SQL } from 'drizzle-orm';
+import { getDb, markets, events, priceHistory, trades } from '../../db';
 import { cached } from '../middleware/cache';
 import { ftsWhere } from '../../db/search';
 
@@ -22,6 +23,7 @@ const ListMarketsQuerySchema = z.object({
   active: z.enum(['true', 'false']).optional(),
   closed: z.enum(['true', 'false']).optional(),
   category: z.string().optional(),
+  event_category: z.string().optional(),
   sort: z.enum(['volume', 'volume_24hr', 'liquidity', 'created_at']).default('volume_24hr'),
   order: z.enum(['asc', 'desc']).default('desc'),
   search: z.string().optional(),
@@ -38,11 +40,11 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
     return c.json({ error: 'Invalid query parameters', details: query.error.format() }, 400);
   }
 
-  const { limit, offset, active, closed, category, sort, order, search, includeCount } = query.data;
+  const { limit, offset, active, closed, category, event_category, sort, order, search, includeCount } = query.data;
   const db = getDb();
 
   // Build where conditions
-  const conditions: ReturnType<typeof eq>[] = [];
+  const conditions: SQL[] = [];
 
   if (active !== undefined) {
     conditions.push(eq(markets.active, active === 'true'));
@@ -54,6 +56,14 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
 
   if (category) {
     conditions.push(eq(markets.category, category));
+  }
+
+  if (event_category) {
+    conditions.push(
+      sql`${markets.eventId} IN (
+        SELECT id FROM events WHERE categories @> ${JSON.stringify([event_category])}::jsonb
+      )`,
+    );
   }
 
   if (search) {

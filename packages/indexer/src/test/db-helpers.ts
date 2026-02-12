@@ -80,6 +80,8 @@ export async function seedTestData() {
       active: true,
       closed: false,
       archived: false,
+      categories: ['crypto', 'crypto/bitcoin'],
+      gammaCategory: 'Crypto',
     },
     {
       id: 'event-2',
@@ -92,6 +94,8 @@ export async function seedTestData() {
       active: true,
       closed: true,
       archived: false,
+      categories: ['politics', 'politics/us-elections'],
+      gammaCategory: 'Politics',
     },
     {
       id: 'event-3',
@@ -104,6 +108,8 @@ export async function seedTestData() {
       active: false,
       closed: true,
       archived: true,
+      categories: ['crypto', 'crypto/ethereum'],
+      gammaCategory: 'Crypto',
     },
   ]).onConflictDoNothing();
 

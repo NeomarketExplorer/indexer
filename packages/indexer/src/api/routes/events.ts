@@ -11,6 +11,7 @@ import { eq, desc, asc, and, sql } from 'drizzle-orm';
 import { getDb, events } from '../../db';
 import { cached } from '../middleware/cache';
 import { ftsWhere } from '../../db/search';
+import type { SQL } from 'drizzle-orm';
 
 export const eventsRouter = new Hono();
 
@@ -20,6 +21,7 @@ const ListEventsQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   active: z.enum(['true', 'false']).optional(),
   closed: z.enum(['true', 'false']).optional(),
+  category: z.string().optional(),
   sort: z.enum(['volume', 'volume_24hr', 'liquidity', 'created_at']).default('volume'),
   order: z.enum(['asc', 'desc']).default('desc'),
   search: z.string().optional(),
@@ -36,11 +38,11 @@ eventsRouter.get('/', cached({ ttl: 60 }), async (c) => {
     return c.json({ error: 'Invalid query parameters', details: query.error.format() }, 400);
   }
 
-  const { limit, offset, active, closed, sort, order, search, includeCount } = query.data;
+  const { limit, offset, active, closed, category, sort, order, search, includeCount } = query.data;
   const db = getDb();
 
   // Build where conditions
-  const conditions: ReturnType<typeof eq>[] = [];
+  const conditions: SQL[] = [];
 
   if (active !== undefined) {
     conditions.push(eq(events.active, active === 'true'));
@@ -48,6 +50,10 @@ eventsRouter.get('/', cached({ ttl: 60 }), async (c) => {
 
   if (closed !== undefined) {
     conditions.push(eq(events.closed, closed === 'true'));
+  }
+
+  if (category) {
+    conditions.push(sql`${events.categories} @> ${JSON.stringify([category])}::jsonb`);
   }
 
   if (search) {

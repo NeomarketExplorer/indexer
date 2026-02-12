@@ -64,6 +64,10 @@ export const events = pgTable('events', {
   active: boolean('active').default(true),
   closed: boolean('closed').default(false),
   archived: boolean('archived').default(false),
+  // Custom categories (2-level hierarchy: parent + child slugs)
+  categories: jsonb('categories').$type<string[]>().default([]),
+  gammaCategory: text('gamma_category'),
+
   searchVector: tsvector('search_vector'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
@@ -72,6 +76,8 @@ export const events = pgTable('events', {
   index('events_active_idx').on(table.active),
   index('events_volume_idx').on(table.volume),
   index('events_search_idx').using('gin', table.searchVector),
+  index('events_categories_idx').using('gin', table.categories),
+  index('events_gamma_category_idx').on(table.gammaCategory),
 ]);
 
 // ============================================

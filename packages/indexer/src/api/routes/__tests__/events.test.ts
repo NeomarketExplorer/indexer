@@ -83,6 +83,36 @@ describe('Events routes', () => {
       }
     });
 
+    it('filters by custom category (parent)', async () => {
+      const res = await app.request('/events?category=crypto');
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.length).toBeGreaterThan(0);
+      body.data.forEach((e: { categories: string[] }) => {
+        expect(e.categories).toContain('crypto');
+      });
+    });
+
+    it('filters by custom category (child)', async () => {
+      const res = await app.request('/events?category=politics/us-elections');
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.length).toBeGreaterThan(0);
+      body.data.forEach((e: { categories: string[] }) => {
+        expect(e.categories).toContain('politics/us-elections');
+      });
+    });
+
+    it('returns empty data for non-existent category', async () => {
+      const res = await app.request('/events?category=nonexistent/foo');
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.length).toBe(0);
+    });
+
     it('returns 400 for invalid query params', async () => {
       const res = await app.request('/events?limit=-1');
 

@@ -21,6 +21,7 @@ import { getDb, markets, events, trades, syncState, type NewMarket, type NewEven
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
 import { invalidateCache } from '../api/middleware/cache';
+import { classifyEvent } from '../lib/categories';
 
 export class BatchSyncManager {
   private logger = createChildLogger({ module: 'batch-sync' });
@@ -474,6 +475,13 @@ export class BatchSyncManager {
       active: event.active ?? true,
       closed: event.closed ?? false,
       archived: event.archived ?? false,
+      categories: classifyEvent({
+        title: event.title,
+        description: event.description,
+        gammaCategory: event.category,
+        gammaTags: event.tags?.map(t => t.label) ?? [],
+      }),
+      gammaCategory: event.category ?? null,
       updatedAt: new Date(),
     }));
 
@@ -501,6 +509,8 @@ export class BatchSyncManager {
               ELSE excluded.active
             END
           `,
+          categories: sql`excluded.categories`,
+          gammaCategory: sql`excluded.gamma_category`,
           updatedAt: sql`excluded.updated_at`,
         },
       });
@@ -872,7 +882,7 @@ export class BatchSyncManager {
     const db = getDb();
     const result = await db.execute(sql`
       UPDATE events
-      SET active = false, updated_at = NOW()
+      SET active = false, closed = true, updated_at = NOW()
       WHERE active = true
         AND closed = false
         AND id IN (

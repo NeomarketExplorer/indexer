@@ -90,10 +90,23 @@ statsRouter.get('/', cached({ ttl: 120 }), async (c) => {
         count: toNumber(c.count),
         volume: toNumber(c.volume),
       })),
+      customCategories: await getCustomCategoryStats(db),
       updatedAt: new Date().toISOString(),
     },
   });
 });
+
+async function getCustomCategoryStats(db: ReturnType<typeof getDb>) {
+  const rows = await db.execute(sql`
+    SELECT cat.value #>> '{}' AS slug, count(*)::int AS count
+    FROM events, jsonb_array_elements(categories) AS cat(value)
+    GROUP BY cat.value
+    ORDER BY count(*) DESC
+    LIMIT 20
+  `) as unknown as Array<{ slug: string; count: number }>;
+
+  return rows.map(r => ({ slug: r.slug, count: r.count }));
+}
 
 /**
  * GET /stats/sync - Sync status
