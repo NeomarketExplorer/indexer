@@ -655,10 +655,100 @@ export class BatchSyncManager {
    */
   private async runExpirationAudit(): Promise<void> {
     try {
+      await this.auditExpiredMarketsCLOB();
       await this.auditEventsWithNoActiveMarkets();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error({ error: errorMessage }, 'Expiration audit failed');
+    }
+  }
+
+  /**
+   * Fast-track audit for markets past their end date.
+   * Only targets expired-but-still-open markets — a tiny set that should
+   * converge within 1-2 runs (60-120s) after a market expires.
+   */
+  private async auditExpiredMarketsCLOB(): Promise<void> {
+    const db = getDb();
+
+    const expired = await db.query.markets.findMany({
+      where: and(
+        eq(markets.closed, false),
+        eq(markets.archived, false),
+        sql`${markets.endDateIso} IS NOT NULL AND ${markets.endDateIso}::timestamptz < NOW()`,
+        sql`length(${markets.conditionId}) > 0`,
+      ),
+      columns: { id: true, eventId: true, conditionId: true },
+      limit: 200,
+    });
+
+    if (expired.length === 0) return;
+
+    const closedMarketIds: string[] = [];
+    const touchedEventIds = new Set<string>();
+    const concurrency = Math.max(1, this.config.clobAuditConcurrency);
+    let idx = 0;
+
+    const worker = async () => {
+      while (true) {
+        const i = idx++;
+        if (i >= expired.length) return;
+        const m = expired[i]!;
+
+        try {
+          const status = await this.clobClient.getMarket(m.conditionId);
+          const isClosed =
+            status.closed === true ||
+            status.accepting_orders === false ||
+            status.enable_order_book === false;
+
+          if (isClosed) {
+            closedMarketIds.push(m.id);
+            if (m.eventId) touchedEventIds.add(m.eventId);
+          }
+        } catch {
+          // Transient errors — will retry next cycle.
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+    if (closedMarketIds.length > 0) {
+      const idList = sql.join(closedMarketIds.map(id => sql`${id}`), sql`,`);
+      await db.execute(sql`
+        UPDATE markets
+        SET closed = true, active = false, updated_at = NOW()
+        WHERE id IN (${idList})
+      `);
+
+      // Close parent events that have no remaining open markets.
+      if (touchedEventIds.size > 0) {
+        const eList = sql.join(Array.from(touchedEventIds).map(id => sql`${id}`), sql`,`);
+        await db.execute(sql`
+          UPDATE events e
+          SET active = false, closed = true, updated_at = NOW()
+          WHERE e.id IN (${eList})
+            AND NOT EXISTS (
+              SELECT 1 FROM markets m
+              WHERE m.event_id = e.id
+                AND m.closed = false
+                AND m.archived = false
+            )
+        `);
+      }
+
+      await invalidateCache('neomarket:cache:GET:/markets*');
+      await invalidateCache('neomarket:cache:GET:/events*');
+      await invalidateCache('neomarket:cache:GET:/stats*');
+    }
+
+    if (closedMarketIds.length > 0) {
+      this.logger.info({
+        checked: expired.length,
+        closed: closedMarketIds.length,
+        events: touchedEventIds.size,
+      }, 'Expired markets CLOB audit completed');
     }
   }
 
