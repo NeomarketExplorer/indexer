@@ -118,51 +118,86 @@ export class SyncOrchestrator {
   private startCleanupJob(): void {
     // Run every 24 hours
     this.cleanupInterval = setInterval(
-      () => this.cleanupPriceHistory(),
+      () => this.runCleanup(),
       24 * 60 * 60 * 1000
     );
 
     // Also run once 5 minutes after startup
-    setTimeout(() => this.cleanupPriceHistory(), 5 * 60 * 1000);
+    setTimeout(() => this.runCleanup(), 5 * 60 * 1000);
   }
 
   /**
    * Delete price_history rows older than retention period.
    * Deletes in batches to avoid long-held locks.
    */
-  private async cleanupPriceHistory(): Promise<void> {
+  private async runCleanup(): Promise<void> {
     const config = getConfig();
     const db = getDb();
     const logger = createChildLogger({ module: 'cleanup' });
-    const cutoff = new Date(Date.now() - config.priceHistoryRetentionDays * 24 * 60 * 60 * 1000);
 
-    let totalDeleted = 0;
+    // price_history cleanup
+    if (config.enablePriceHistory === true) {
+      const cutoff = new Date(Date.now() - config.priceHistoryRetentionDays * 24 * 60 * 60 * 1000);
+      let totalDeleted = 0;
 
-    try {
-      while (true) {
-        const deleted = await db.execute(sql`
-          DELETE FROM price_history
-          WHERE id IN (
-            SELECT id FROM price_history
-            WHERE timestamp < ${cutoff}
-            LIMIT 5000
-          )
-          RETURNING id
-        `);
+      try {
+        while (true) {
+          const deleted = await db.execute(sql`
+            DELETE FROM price_history
+            WHERE id IN (
+              SELECT id FROM price_history
+              WHERE timestamp < ${cutoff}
+              LIMIT 5000
+            )
+            RETURNING id
+          `);
 
-        const count = Array.isArray(deleted) ? deleted.length : 0;
-        totalDeleted += count;
+          const count = Array.isArray(deleted) ? deleted.length : 0;
+          totalDeleted += count;
 
-        if (count < 5000) break;
-        // Yield to other queries between batches
-        await new Promise(resolve => setTimeout(resolve, 100));
+          if (count < 5000) break;
+          // Yield to other queries between batches
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (totalDeleted > 0) {
+          logger.info({ totalDeleted, retentionDays: config.priceHistoryRetentionDays, cutoff: cutoff.toISOString() }, 'Price history cleanup completed');
+        }
+      } catch (error) {
+        logger.error({ error }, 'Price history cleanup failed');
       }
+    }
 
-      if (totalDeleted > 0) {
-        logger.info({ totalDeleted, retentionDays: config.priceHistoryRetentionDays, cutoff: cutoff.toISOString() }, 'Price history cleanup completed');
+    // trades cleanup (only relevant if we are persisting trades)
+    if (config.enableTradesSync === true) {
+      const cutoff = new Date(Date.now() - config.tradesRetentionDays * 24 * 60 * 60 * 1000);
+      let totalDeleted = 0;
+
+      try {
+        while (true) {
+          const deleted = await db.execute(sql`
+            DELETE FROM trades
+            WHERE id IN (
+              SELECT id FROM trades
+              WHERE timestamp < ${cutoff}
+              LIMIT 5000
+            )
+            RETURNING id
+          `);
+
+          const count = Array.isArray(deleted) ? deleted.length : 0;
+          totalDeleted += count;
+
+          if (count < 5000) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (totalDeleted > 0) {
+          logger.info({ totalDeleted, retentionDays: config.tradesRetentionDays, cutoff: cutoff.toISOString() }, 'Trades cleanup completed');
+        }
+      } catch (error) {
+        logger.error({ error }, 'Trades cleanup failed');
       }
-    } catch (error) {
-      logger.error({ error }, 'Price history cleanup failed');
     }
   }
 }

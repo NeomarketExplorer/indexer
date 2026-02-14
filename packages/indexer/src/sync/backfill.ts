@@ -20,6 +20,10 @@ export class BackfillManager {
     marketId: string,
     interval: 'max' | '1w' | '1d' | '6h' | '1h' = 'max'
   ): Promise<number> {
+    if (this.config.enablePriceHistory !== true) {
+      this.logger.info({ marketId }, 'Price history persistence disabled; skipping backfill');
+      return 0;
+    }
     const db = getDb();
 
     // Get market to find condition ID

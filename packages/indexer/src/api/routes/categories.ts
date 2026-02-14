@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { sql } from 'drizzle-orm';
-import { getDb, events } from '../../db';
+import { getDb } from '../../db';
 import { cached } from '../middleware/cache';
 import { getAllCategories, getCategoryLabel } from '../../lib/categories';
 

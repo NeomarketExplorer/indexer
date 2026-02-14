@@ -67,6 +67,21 @@ const ConfigSchema = z.object({
 
   // Data retention
   priceHistoryRetentionDays: z.coerce.number().int().positive().default(30),
+  // Only relevant when ENABLE_TRADES_SYNC=true. Trades can be extremely high
+  // volume, so default retention is short.
+  tradesRetentionDays: z.coerce.number().int().positive().default(14),
+  // Whether to persist price_history rows in Postgres at all. For high-volume
+  // deployments, you typically want full-fidelity history in ClickHouse and only
+  // keep current state (markets.outcomePrices) in Postgres.
+  enablePriceHistory: z.preprocess((v) => {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') return v.trim().toLowerCase() === 'true';
+    return undefined;
+  }, z.boolean().default(true)),
+  // Optional downsampling: only write one price_history point per token per bucket.
+  // 0 disables bucketing (writes every buffered update).
+  priceHistoryBucketSeconds: z.coerce.number().int().nonnegative().default(0),
 
   // Health: sync considered stale if older than this
   syncStaleThresholdMs: z.coerce.number().int().positive().default(15 * 60 * 1000),
@@ -120,6 +135,9 @@ export function getConfig(): Config {
     rateLimitBurst: process.env.RATE_LIMIT_BURST,
     rateLimitWindowMs: process.env.RATE_LIMIT_WINDOW_MS,
     priceHistoryRetentionDays: process.env.PRICE_HISTORY_RETENTION_DAYS,
+    tradesRetentionDays: process.env.TRADES_RETENTION_DAYS,
+    enablePriceHistory: process.env.ENABLE_PRICE_HISTORY,
+    priceHistoryBucketSeconds: process.env.PRICE_HISTORY_BUCKET_SECONDS,
     syncStaleThresholdMs: process.env.SYNC_STALE_THRESHOLD_MS,
     logLevel: process.env.LOG_LEVEL,
     nodeEnv: process.env.NODE_ENV,

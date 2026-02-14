@@ -16,6 +16,7 @@ import { eventsRouter } from './routes/events';
 import { statsRouter } from './routes/stats';
 import { healthRouter } from './routes/health';
 import { categoriesRouter } from './routes/categories';
+import { internalRouter } from './routes/internal';
 import { getLogger } from '../lib/logger';
 import { getConfig } from '../lib/config';
 import { rateLimit } from './middleware/rateLimit';
@@ -53,6 +54,7 @@ app.route('/markets', marketsRouter);
 app.route('/events', eventsRouter);
 app.route('/stats', statsRouter);
 app.route('/categories', categoriesRouter);
+app.route('/internal', internalRouter);
 
 // Root endpoint
 app.get('/', (c) => {

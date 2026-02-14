@@ -10,7 +10,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { eq, desc, asc, and, sql, inArray, gte } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
-import { getDb, markets, events, priceHistory, trades } from '../../db';
+import { getDb, markets, priceHistory, trades } from '../../db';
 import { cached } from '../middleware/cache';
 import { ftsWhere } from '../../db/search';
 

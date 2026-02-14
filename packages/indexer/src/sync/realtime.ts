@@ -7,7 +7,7 @@
  * - #9  Never permanently give up reconnecting
  */
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { getDb, markets, priceHistory, syncState } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
@@ -29,6 +29,8 @@ interface WebSocketMessage {
 }
 
 const BUFFER_SIZE_WARNING = 10000;
+// Postgres has a 65535 bind-parameter limit; chunk multi-row inserts to stay safe.
+const PRICE_HISTORY_INSERT_CHUNK_SIZE = 2000;
 
 type WsClient = {
   id: number;
@@ -48,6 +50,8 @@ export class RealtimeSyncManager {
   private isFlushingPrices = false;
   private shouldReconnect = true;
   private priceBuffer: Map<string, PriceUpdate> = new Map();
+  // Token -> bucketStartMs last persisted to price_history (when bucketing enabled).
+  private lastPersistedBucketByToken: Map<string, number> = new Map();
   private flushInterval: NodeJS.Timeout | null = null;
   private subscribedTokens: Set<string> = new Set();
   private tokenToMarket: Map<string, string> = new Map();
@@ -116,6 +120,7 @@ export class RealtimeSyncManager {
 
     this.tokenToMarket.clear();
     this.subscribedTokens.clear();
+    this.lastPersistedBucketByToken.clear();
 
     for (const market of activeMarkets) {
       const tokenIds = market.outcomeTokenIds as string[];
@@ -417,43 +422,81 @@ export class RealtimeSyncManager {
       // Group updates by market for batch processing
       const marketUpdates = new Map<string, PriceUpdate[]>();
       for (const update of updates) {
-        const existing = marketUpdates.get(update.marketId) ?? [];
+        let existing = marketUpdates.get(update.marketId);
+        if (!existing) {
+          existing = [];
+          marketUpdates.set(update.marketId, existing);
+        }
         existing.push(update);
-        marketUpdates.set(update.marketId, existing);
       }
 
-      for (const [marketId, priceUpdates] of marketUpdates) {
-        const market = await db.query.markets.findFirst({
-          where: eq(markets.id, marketId),
+      // Fetch all touched markets in one query to reduce round trips.
+      const marketIds = Array.from(marketUpdates.keys());
+      const touchedMarkets = marketIds.length > 0
+        ? await db.query.markets.findMany({
+          where: inArray(markets.id, marketIds),
           columns: {
+            id: true,
             outcomeTokenIds: true,
             outcomePrices: true,
           },
-        });
+        })
+        : [];
+      const marketById = new Map(touchedMarkets.map(m => [m.id, m]));
+
+      const shouldWriteHistory = this.config.enablePriceHistory === true;
+      const bucketSeconds = Math.max(0, this.config.priceHistoryBucketSeconds);
+      const bucketMs = bucketSeconds > 0 ? bucketSeconds * 1000 : 0;
+
+      // Batch insert price history rows (chunked).
+      const historyRows: Array<typeof priceHistory.$inferInsert> = shouldWriteHistory ? [] : [];
+
+      for (const [marketId, priceUpdates] of marketUpdates) {
+        const market = marketById.get(marketId);
 
         if (!market) continue;
 
         const tokenIds = market.outcomeTokenIds as string[];
-        const newPrices = [...(market.outcomePrices as number[])];
+        const currentPrices = (market.outcomePrices as number[]) ?? [];
+        // Keep prices aligned to tokenIds length even if the stored array is malformed/short.
+        const newPrices = Array.from({ length: tokenIds.length }, (_, i) => currentPrices[i] ?? 0);
+
+        // O(1) token lookup (avoid repeated indexOf inside loops).
+        const tokenIndexById = new Map<string, number>();
+        for (let i = 0; i < tokenIds.length; i++) {
+          const t = tokenIds[i];
+          if (t) tokenIndexById.set(t, i);
+        }
 
         for (const update of priceUpdates) {
-          const tokenIndex = tokenIds.indexOf(update.tokenId);
-          if (tokenIndex !== -1) {
+          const tokenIndex = tokenIndexById.get(update.tokenId);
+          if (tokenIndex !== undefined) {
             newPrices[tokenIndex] = update.price;
           }
 
-          // Insert price history
-          await db.insert(priceHistory)
-            .values({
+          if (shouldWriteHistory) {
+            let ts = update.timestamp;
+
+            // When bucketing is enabled, only persist one point per token per bucket.
+            // This is the primary lever to keep Postgres disk usage under control.
+            if (bucketMs > 0) {
+              const bucketStartMs = Math.floor(ts.getTime() / bucketMs) * bucketMs;
+              const lastBucket = this.lastPersistedBucketByToken.get(update.tokenId);
+              if (lastBucket === bucketStartMs) {
+                continue;
+              }
+              this.lastPersistedBucketByToken.set(update.tokenId, bucketStartMs);
+              ts = new Date(bucketStartMs);
+            }
+
+            historyRows.push({
               marketId: update.marketId,
               tokenId: update.tokenId,
-              timestamp: update.timestamp,
+              timestamp: ts,
               price: update.price,
               source: 'websocket',
-            })
-            .onConflictDoNothing({
-              target: [priceHistory.marketId, priceHistory.tokenId, priceHistory.timestamp, priceHistory.source],
             });
+          }
         }
 
         // (#7) Update outcomePrices only — do NOT overwrite lastTradePrice.
@@ -466,6 +509,18 @@ export class RealtimeSyncManager {
             priceUpdatedAt: new Date(),
           })
           .where(eq(markets.id, marketId));
+      }
+
+      if (shouldWriteHistory && historyRows.length > 0) {
+        // Insert price history in chunks to avoid huge single queries.
+        for (let i = 0; i < historyRows.length; i += PRICE_HISTORY_INSERT_CHUNK_SIZE) {
+          const chunk = historyRows.slice(i, i + PRICE_HISTORY_INSERT_CHUNK_SIZE);
+          await db.insert(priceHistory)
+            .values(chunk)
+            .onConflictDoNothing({
+              target: [priceHistory.marketId, priceHistory.tokenId, priceHistory.timestamp, priceHistory.source],
+            });
+        }
       }
 
       // Clear only the entries we successfully flushed (#6)

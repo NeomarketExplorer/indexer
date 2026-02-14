@@ -208,8 +208,10 @@ export class BatchSyncManager {
       await this.updateSyncState('events', 'idle', { count: totalEvents, durationMs: Date.now() - startTime });
 
       // Targeted invalidation (#11)
-      await invalidateCache('neomarket:cache:GET:/events*');
-      await invalidateCache('neomarket:cache:GET:/stats*');
+      await Promise.all([
+        invalidateCache('neomarket:cache:GET:/events*'),
+        invalidateCache('neomarket:cache:GET:/stats*'),
+      ]);
 
       this.logger.info({ totalEvents, durationMs: Date.now() - startTime }, 'Events sync completed');
 
@@ -280,8 +282,10 @@ export class BatchSyncManager {
       await this.updateSyncState('markets', 'idle', { count: totalMarkets, durationMs: Date.now() - startTime });
 
       // Targeted invalidation (#11)
-      await invalidateCache('neomarket:cache:GET:/markets*');
-      await invalidateCache('neomarket:cache:GET:/stats*');
+      await Promise.all([
+        invalidateCache('neomarket:cache:GET:/markets*'),
+        invalidateCache('neomarket:cache:GET:/stats*'),
+      ]);
 
       this.lastSyncAt = new Date();
       this.logger.info({ totalMarkets, durationMs: Date.now() - startTime }, 'Markets sync completed');
@@ -738,9 +742,11 @@ export class BatchSyncManager {
         `);
       }
 
-      await invalidateCache('neomarket:cache:GET:/markets*');
-      await invalidateCache('neomarket:cache:GET:/events*');
-      await invalidateCache('neomarket:cache:GET:/stats*');
+      await Promise.all([
+        invalidateCache('neomarket:cache:GET:/markets*'),
+        invalidateCache('neomarket:cache:GET:/events*'),
+        invalidateCache('neomarket:cache:GET:/stats*'),
+      ]);
     }
 
     if (closedMarketIds.length > 0) {
@@ -936,9 +942,11 @@ export class BatchSyncManager {
       }
 
       if (closedCount > 0) {
-        await invalidateCache('neomarket:cache:GET:/markets*');
-        await invalidateCache('neomarket:cache:GET:/events*');
-        await invalidateCache('neomarket:cache:GET:/stats*');
+        await Promise.all([
+          invalidateCache('neomarket:cache:GET:/markets*'),
+          invalidateCache('neomarket:cache:GET:/events*'),
+          invalidateCache('neomarket:cache:GET:/stats*'),
+        ]);
       }
 
       const nextCursorConditionId = toCheck[toCheck.length - 1]?.conditionId ?? cursorConditionId;
@@ -988,8 +996,10 @@ export class BatchSyncManager {
     const count = result.length;
     this.logger.info({ count }, 'Events with no active markets audit completed');
     if (count > 0) {
-      await invalidateCache('neomarket:cache:GET:/events*');
-      await invalidateCache('neomarket:cache:GET:/stats*');
+      await Promise.all([
+        invalidateCache('neomarket:cache:GET:/events*'),
+        invalidateCache('neomarket:cache:GET:/stats*'),
+      ]);
     }
   }
 
