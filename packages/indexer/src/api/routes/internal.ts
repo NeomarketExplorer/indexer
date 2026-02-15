@@ -85,6 +85,15 @@ internalRouter.get('/export/market-categories', async (c) => {
     .limit(limit)
     .offset(offset);
 
+  const toIso = (value: unknown): string | null => {
+    if (!value) return null;
+    if (value instanceof Date) {
+      return Number.isFinite(value.getTime()) ? value.toISOString() : null;
+    }
+    const d = new Date(String(value));
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  };
+
   return c.json({
     data: rows.map((r) => ({
       condition_id: r.condition_id,
@@ -93,7 +102,7 @@ internalRouter.get('/export/market-categories', async (c) => {
       event_title: r.event_title ?? null,
       event_slug: r.event_slug ?? null,
       categories: (r.categories ?? []) as string[],
-      updated_at: r.updated_at?.toISOString?.() ?? null,
+      updated_at: toIso(r.updated_at),
     })),
     pagination: {
       limit,
