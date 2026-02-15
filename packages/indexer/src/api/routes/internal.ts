@@ -44,6 +44,16 @@ internalRouter.get('/export/market-categories', async (c) => {
   const { limit, offset, since } = query.data;
   const db = getDb();
 
+  // Postgres GREATEST() returns NULL if ANY argument is NULL; production data may
+  // contain legacy NULL updated_at values. Coalesce to epoch so export is stable
+  // and incremental sync works.
+  const updatedAtExpr = sql<Date>`
+    GREATEST(
+      COALESCE(${markets.updatedAt}, to_timestamp(0)),
+      COALESCE(${events.updatedAt}, to_timestamp(0))
+    )
+  `;
+
   const conditions: SQL[] = [];
   if (since) {
     const sinceDate = new Date(since);
@@ -52,7 +62,7 @@ internalRouter.get('/export/market-categories', async (c) => {
     }
     // If either the market row or its parent event changed, export it.
     conditions.push(
-      gte(sql`GREATEST(${markets.updatedAt}, ${events.updatedAt})`, sinceDate),
+      gte(updatedAtExpr, sinceDate),
     );
   }
 
@@ -66,12 +76,12 @@ internalRouter.get('/export/market-categories', async (c) => {
       event_title: events.title,
       event_slug: events.slug,
       categories: events.categories,
-      updated_at: sql<Date>`GREATEST(${markets.updatedAt}, ${events.updatedAt})`,
+      updated_at: updatedAtExpr,
     })
     .from(markets)
     .leftJoin(events, eq(markets.eventId, events.id))
     .where(where)
-    .orderBy(asc(sql`GREATEST(${markets.updatedAt}, ${events.updatedAt})`), asc(markets.id))
+    .orderBy(asc(updatedAtExpr), asc(markets.id))
     .limit(limit)
     .offset(offset);
 
@@ -92,4 +102,3 @@ internalRouter.get('/export/market-categories', async (c) => {
     },
   });
 });
-
