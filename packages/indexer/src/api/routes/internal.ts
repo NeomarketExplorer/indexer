@@ -7,7 +7,7 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, asc, eq, gte, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import { events, getDb, markets } from '../../db';
 
@@ -60,10 +60,9 @@ internalRouter.get('/export/market-categories', async (c) => {
     if (!Number.isFinite(sinceDate.getTime())) {
       return c.json({ error: 'Invalid since; expected ISO timestamp' }, 400);
     }
+    const sinceIso = sinceDate.toISOString();
     // If either the market row or its parent event changed, export it.
-    conditions.push(
-      gte(updatedAtExpr, sinceDate),
-    );
+    conditions.push(sql`${updatedAtExpr} >= ${sinceIso}::timestamptz`);
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;

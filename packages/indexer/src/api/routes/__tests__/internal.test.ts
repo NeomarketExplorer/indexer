@@ -33,6 +33,14 @@ describe('Internal routes', () => {
       expect(first).toHaveProperty('categories');
       expect(Array.isArray(first.categories)).toBe(true);
     });
+
+    it('supports incremental sync with since', async () => {
+      const res = await app.request('/internal/export/market-categories?limit=10&since=2020-01-01T00:00:00.000Z');
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toHaveProperty('data');
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body).toHaveProperty('pagination');
+    });
   });
 });
-
