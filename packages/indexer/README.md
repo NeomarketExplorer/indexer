@@ -54,10 +54,22 @@ pnpm server  # API server only
 pnpm worker  # Sync worker only
 ```
 
+
+## Production Profile (Neomarket)
+
+Current production role is metadata/taxonomy control plane for ClickHouse.
+
+- Internal export endpoint for ClickHouse sync:
+  - `GET /internal/export/market-categories?limit=&offset=&since=`
+  - Protected by `INTERNAL_API_TOKEN` via `x-internal-token` header
+  - `updated_at` is emitted as non-null ISO string for incremental sync checkpoints
+- Heavy storage paths are optional and usually disabled in prod via env:
+  - `ENABLE_PRICE_HISTORY=false`
+  - `ENABLE_TRADES_SYNC=false`
 ## API Endpoints
 
 ### Markets
-- `GET /markets` - List markets with filters
+- `GET /markets` - List markets with filters (including `conditionId`, supports comma-separated values)
 - `GET /markets/:id` - Single market with event
 - `GET /markets/:id/history` - Price history
 - `GET /markets/:id/trades` - Recent trades
@@ -77,6 +89,9 @@ pnpm worker  # Sync worker only
 - `GET /health/live` - Liveness probe
 - `GET /health/ready` - Readiness probe
 
+### Internal
+- `GET /internal/export/market-categories?limit=&offset=&since=` - Taxonomy export for ClickHouse sync (requires `x-internal-token` when `INTERNAL_API_TOKEN` is set)
+
 ## Configuration
 
 See `.env.example` for all configuration options:
@@ -95,6 +110,13 @@ PRICE_FLUSH_INTERVAL=1000     # 1 second
 
 # Logging
 LOG_LEVEL=info
+
+# Internal export auth
+INTERNAL_API_TOKEN=<long-random-token>
+
+# Optional heavy data paths (typically disabled in prod)
+ENABLE_PRICE_HISTORY=false
+ENABLE_TRADES_SYNC=false
 ```
 
 ## Architecture

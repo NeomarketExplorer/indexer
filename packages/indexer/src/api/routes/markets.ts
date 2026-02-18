@@ -24,6 +24,7 @@ const ListMarketsQuerySchema = z.object({
   closed: z.enum(['true', 'false']).optional(),
   category: z.string().optional(),
   event_category: z.string().optional(),
+  conditionId: z.string().optional(),
   sort: z.enum(['volume', 'volume_24hr', 'liquidity', 'created_at']).default('volume_24hr'),
   order: z.enum(['asc', 'desc']).default('desc'),
   search: z.string().optional(),
@@ -40,7 +41,7 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
     return c.json({ error: 'Invalid query parameters', details: query.error.format() }, 400);
   }
 
-  const { limit, offset, active, closed, category, event_category, sort, order, search, includeCount } = query.data;
+  const { limit, offset, active, closed, category, event_category, conditionId, sort, order, search, includeCount } = query.data;
   const db = getDb();
 
   // Build where conditions
@@ -64,6 +65,20 @@ marketsRouter.get('/', cached({ ttl: 60 }), async (c) => {
         SELECT id FROM events WHERE categories @> ${JSON.stringify([event_category])}::jsonb
       )`,
     );
+  }
+
+  if (conditionId) {
+    const conditionIds = [...new Set(
+      conditionId
+        .split(',')
+        .map(id => id.trim())
+        .filter(Boolean),
+    )];
+    if (conditionIds.length === 1) {
+      conditions.push(eq(markets.conditionId, conditionIds[0]!));
+    } else if (conditionIds.length > 1) {
+      conditions.push(inArray(markets.conditionId, conditionIds));
+    }
   }
 
   if (search) {

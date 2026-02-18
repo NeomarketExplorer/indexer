@@ -84,6 +84,26 @@ describe('Markets routes', () => {
       expect(body.data.length).toBeGreaterThan(0);
     });
 
+    it('filters by single conditionId', async () => {
+      const res = await app.request('/markets?conditionId=cond-3');
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data).toHaveLength(1);
+      expect(body.data[0].conditionId).toBe('cond-3');
+      expect(body.data[0].id).toBe('market-3');
+    });
+
+    it('filters by comma-separated conditionIds', async () => {
+      const res = await app.request('/markets?conditionId=cond-1,cond-4');
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data).toHaveLength(2);
+      const ids = body.data.map((m: { conditionId: string }) => m.conditionId).sort();
+      expect(ids).toEqual(['cond-1', 'cond-4']);
+    });
+
     it('sorts by volume_24hr descending by default', async () => {
       const res = await app.request('/markets');
 
