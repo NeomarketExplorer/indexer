@@ -2,7 +2,7 @@
  * Internal/export endpoints for cross-system sync.
  *
  * These are intended for server-to-server usage (e.g. ClickHouse metadata sync).
- * If INTERNAL_API_TOKEN is set, callers must provide `x-internal-token`.
+ * Requires INTERNAL_API_TOKEN env var; callers must provide `x-internal-token` header.
  */
 
 import { Hono } from 'hono';
@@ -15,7 +15,9 @@ export const internalRouter = new Hono();
 
 internalRouter.use('*', async (c, next) => {
   const token = process.env.INTERNAL_API_TOKEN;
-  if (!token) return next();
+  if (!token) {
+    return c.json({ error: 'INTERNAL_API_TOKEN not configured' }, 503);
+  }
   const provided = c.req.header('x-internal-token');
   if (!provided || provided !== token) {
     return c.json({ error: 'Unauthorized' }, 401);
