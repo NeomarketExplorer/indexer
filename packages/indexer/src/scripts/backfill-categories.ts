@@ -57,7 +57,8 @@ async function main() {
       tagsByEvent.set(row.event_id, arr);
     }
 
-    // Classify and update
+    // Classify all events in batch
+    const updates: Array<{ id: string; categories: string[] }> = [];
     for (const event of batch) {
       const categories = classifyEvent({
         title: event.title,
@@ -65,13 +66,21 @@ async function main() {
         gammaCategory: event.gammaCategory,
         gammaTags: tagsByEvent.get(event.id) ?? [],
       });
-
-      await db.update(schema.events)
-        .set({ categories })
-        .where(eq(schema.events.id, event.id));
-
+      updates.push({ id: event.id, categories });
       processed++;
       if (categories.length > 0) categorized++;
+    }
+
+    // Batch update (parallel chunks of 100)
+    const UPDATE_CHUNK = 100;
+    for (let i = 0; i < updates.length; i += UPDATE_CHUNK) {
+      await Promise.all(
+        updates.slice(i, i + UPDATE_CHUNK).map(u =>
+          db.update(schema.events)
+            .set({ categories: u.categories })
+            .where(eq(schema.events.id, u.id))
+        )
+      );
     }
 
     offset += batch.length;
