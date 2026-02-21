@@ -7,7 +7,7 @@
  * - #9  Never permanently give up reconnecting
  */
 
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { getDb, markets, priceHistory, syncState } from '../db';
 import { getConfig } from '../lib/config';
 import { createChildLogger } from '../lib/logger';
@@ -449,7 +449,10 @@ export class RealtimeSyncManager {
       const bucketMs = bucketSeconds > 0 ? bucketSeconds * 1000 : 0;
 
       // Batch insert price history rows (chunked).
-      const historyRows: Array<typeof priceHistory.$inferInsert> = shouldWriteHistory ? [] : [];
+      const historyRows: Array<typeof priceHistory.$inferInsert> = [];
+
+      // Collect bulk price updates: marketId -> newPrices
+      const bulkPriceUpdates: Array<{ id: string; prices: number[] }> = [];
 
       for (const [marketId, priceUpdates] of marketUpdates) {
         const market = marketById.get(marketId);
@@ -499,16 +502,27 @@ export class RealtimeSyncManager {
           }
         }
 
-        // (#7) Update outcomePrices only — do NOT overwrite lastTradePrice.
-        // WS "last_trade_price" channel gives per-token prices, not a
-        // market-level last-trade value. lastTradePrice should only be set
-        // from verified trade records.
-        await db.update(markets)
-          .set({
-            outcomePrices: newPrices,
-            priceUpdatedAt: new Date(),
-          })
-          .where(eq(markets.id, marketId));
+        bulkPriceUpdates.push({ id: marketId, prices: newPrices });
+      }
+
+      // (#7) Bulk update outcomePrices — do NOT overwrite lastTradePrice.
+      // Single UPDATE ... FROM (VALUES ...) instead of N sequential round trips.
+      if (bulkPriceUpdates.length > 0) {
+        const now = new Date();
+        const BULK_CHUNK_SIZE = 500;
+        for (let i = 0; i < bulkPriceUpdates.length; i += BULK_CHUNK_SIZE) {
+          const chunk = bulkPriceUpdates.slice(i, i + BULK_CHUNK_SIZE);
+          const values = sql.join(
+            chunk.map(u => sql`(${u.id}, ${JSON.stringify(u.prices)}::jsonb)`),
+            sql`, `,
+          );
+          await db.execute(sql`
+            UPDATE markets AS m
+            SET outcome_prices = v.prices, price_updated_at = ${now}
+            FROM (VALUES ${values}) AS v(id, prices)
+            WHERE m.id = v.id
+          `);
+        }
       }
 
       if (shouldWriteHistory && historyRows.length > 0) {
