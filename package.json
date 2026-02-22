@@ -15,7 +15,8 @@
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
-    "docker:rebuild": "docker compose down && docker compose up -d --build"
+    "docker:rebuild": "docker compose down && docker compose up -d --build",
+    "backfill:active": "tsx packages/indexer/src/scripts/backfill-active-flags.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.19.0",
